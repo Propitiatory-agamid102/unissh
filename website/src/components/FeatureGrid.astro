@@ -1,0 +1,75 @@
+---
+import Icon from './Icon.astro';
+
+const features = [
+  {
+    icon: 'lock',
+    tint: 'is-green',
+    title: 'Encrypted vaults',
+    body:
+      'Envelope encryption with per-item keys under a Vault Key. Passwords, notes, SSH keys and host profiles, with version history and strictly type-gated reveal.',
+  },
+  {
+    icon: 'layers',
+    tint: 'is-amber',
+    title: 'Fleet & broadcast exec',
+    body:
+      'Multi-host exec with concurrency limits and per-host timeouts. Run by group or tag, dry-run first, broadcast one input to N PTYs, and fleet-push files over SFTP.',
+  },
+  {
+    icon: 'terminal',
+    tint: 'is-cyan',
+    title: 'Real xterm terminals',
+    body:
+      'Interactive PTY sessions with resize, separate streaming stdout/stderr exec, automatic reconnect with backoff, and seven terminal themes.',
+  },
+  {
+    icon: 'link',
+    tint: 'is-purple',
+    title: 'SFTP & tunnels',
+    body:
+      'Full SFTP with resumable transfers, progress and cancel. Local, remote and dynamic (SOCKS5) forwards, plus ProxyJump chains through your own bastions.',
+  },
+  {
+    icon: 'globe',
+    tint: 'is-accent',
+    title: 'Desktop + mobile',
+    body:
+      'One Rust core, one Tauri 2 + React client for macOS, Windows, Linux, iOS and Android — with a purpose-built native mobile shell.',
+  },
+  {
+    icon: 'server',
+    tint: 'is-green',
+    title: 'Self-hosted ZK server',
+    body:
+      'A ciphertext store with device and team sync, membership, sharing and revocation, plus an append-only audit log. SQLite or Postgres, Docker-deployable.',
+  },
+];
+---
+
+<section class="features section--panel" id="features" aria-labelledby="features-head">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">EVERYTHING A POWER USER NEEDS</span>
+      <h2 id="features-head">One core. <span class="grad-text">Every surface.</span></h2>
+      <p>
+        Vaults, terminals, fleet ops, transfers and tunnels — all built on a single
+        audited Rust core and described exactly as the code implements them.
+      </p>
+    </div>
+
+    <div class="feature-grid">
+      {
+        features.map((f) => (
+          <article class="glass feature reveal">
+            <div class={`feature__icon ${f.tint}`}>
+              <Icon name={f.icon} size={22} stroke={1.7} />
+            </div>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>

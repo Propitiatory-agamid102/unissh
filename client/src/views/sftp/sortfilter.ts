@@ -1,0 +1,22 @@
+// Shared filter+sort for a directory listing — used by FileList (rendering) and
+// useSlot (shift-range selection needs the same visible order).
+
+import type { Entry, SortKey, SortState } from "@/store/sftp-types";
+
+export function compareEntries(a: Entry, b: Entry, key: SortKey, dir: "asc" | "desc"): number {
+  if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; // folders always first
+  let r = 0;
+  if (key === "size") r = a.size - b.size;
+  else if (key === "mtime") r = (a.mtime ?? 0) - (b.mtime ?? 0);
+  else if (key === "mode") r = (a.mode ?? 0) - (b.mode ?? 0);
+  else r = a.name.localeCompare(b.name);
+  if (r === 0) r = a.name.localeCompare(b.name);
+  return dir === "asc" ? r : -r;
+}
+
+export function displayEntries(entries: Entry[], filter: string, sort: SortState): Entry[] {
+  const f = filter.trim().toLowerCase();
+  const list = f ? entries.filter((e) => e.name.toLowerCase().includes(f)) : entries.slice();
+  list.sort((a, b) => compareEntries(a, b, sort.key, sort.dir));
+  return list;
+}

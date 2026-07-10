@@ -1,0 +1,23 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# build output
+dist
+dist-ssr
+*.local
+
+# rust / tauri
+src-tauri/target
+src-tauri/gen
+
+# editor / os
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.log
+
+# i18n migration scratch (assembled into src/i18n/locales, then removed)
+.i18n-slices/
+.i18n-assemble.mjs

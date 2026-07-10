@@ -1,0 +1,50 @@
+[package]
+name = "unissh-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "UniSSH Server — zero-knowledge self-hosted control-plane (ciphertext store + sync + membership/RBAC + audit)"
+
+[lib]
+name = "unissh_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "unissh-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+axum = "0.8.9"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+base64 = "0.22.1"
+bytes = "1.11.1"
+ed25519-dalek = "2.2.0"
+figment = { version = "0.10.19", features = ["toml", "env"] }
+getrandom = "0.4.2"
+hex = "0.4.3"
+http = "1.4.2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
+rustls = "0.23.40"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "migrate", "macros"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.0", features = ["trace", "limit", "timeout", "cors"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+uuid = { version = "1.23.3", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
+tempfile = "3.27.0"
+unissh-crypto = { path = "../rust-core/crates/crypto" }
+unissh-keychain = { path = "../rust-core/crates/keychain" }
+unissh-storage = { path = "../rust-core/crates/storage" }
+unissh-sync = { path = "../rust-core/crates/sync" }
+unissh-vault = { path = "../rust-core/crates/vault" }

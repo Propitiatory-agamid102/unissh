@@ -1,0 +1,88 @@
+---
+import Icon from './Icon.astro';
+/**
+ * Two-up monospace panels: left = rust-core local end-to-end flow,
+ * right = server bring-up (Docker Compose). Both mirror the actual
+ * READMEs. Copy-to-clipboard reads from data-copy on each panel.
+ */
+
+const localFlow = `# Works fully locally — no server required.
+unissh init --password pw            # -> Secret Key (Emergency Kit)
+unissh create-vault --id default --name Default
+unissh gen-key --vault default --item id_ed25519
+unissh exec --vault default --item id_ed25519 \\
+  --host 10.0.0.5 --user deploy \\
+  --jump bastion:22:admin:id_ed25519 \\
+  --command "uname -a"`;
+
+const serverFlow = `# Self-host the zero-knowledge control plane.
+cp deploy/.env.example .env          # set domain + secrets
+$EDITOR .env
+docker compose up -d --build         # Caddy (TLS) + server
+
+# ...or from source:
+cargo build --release
+./target/release/unissh-server migrate --config config.toml
+./target/release/unissh-server --config config.toml`;
+---
+
+<section class="code-show" id="cli" aria-labelledby="cli-head">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">FROM ZERO TO EXEC</span>
+      <h2 id="cli-head">Start <span class="grad-text">local</span>, scale to <span class="grad-text-2">self-hosted</span></h2>
+      <p>The same core that runs on your laptop powers the sync server you deploy.</p>
+    </div>
+
+    <div class="code-grid">
+      <div class="code-panel reveal" data-copy={localFlow}>
+        <div class="code-panel__head">
+          <span class="code-panel__title">
+            <Icon name="terminal" size={15} stroke={1.8} /> rust-core · local flow
+          </span>
+          <button class="copy-btn" type="button" aria-label="Copy local flow to clipboard">
+            <Icon name="copy" size={13} stroke={1.7} /><span>Copy</span>
+          </button>
+        </div>
+        <pre class="code-panel__body"><code>{localFlow}</code></pre>
+      </div>
+
+      <div class="code-panel reveal" data-copy={serverFlow}>
+        <div class="code-panel__head">
+          <span class="code-panel__title">
+            <Icon name="server" size={15} stroke={1.8} /> server · bring-up
+          </span>
+          <button class="copy-btn" type="button" aria-label="Copy server bring-up to clipboard">
+            <Icon name="copy" size={13} stroke={1.7} /><span>Copy</span>
+          </button>
+        </div>
+        <pre class="code-panel__body"><code>{serverFlow}</code></pre>
+      </div>
+    </div>
+
+    <p class="code-show__caption">
+      Works fully locally with a local vault.
+      <span class="mono-tag is-green">no server required</span>
+    </p>
+  </div>
+</section>
+
+<script>
+  document.querySelectorAll<HTMLElement>('.code-panel[data-copy]').forEach((panel) => {
+    const btn = panel.querySelector<HTMLButtonElement>('.copy-btn');
+    const label = btn?.querySelector('span');
+    if (!btn || !label) return;
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(panel.dataset.copy ?? '');
+        const prev = label.textContent;
+        label.textContent = 'Copied';
+        setTimeout(() => {
+          label.textContent = prev;
+        }, 1600);
+      } catch {
+        /* clipboard unavailable */
+      }
+    });
+  });
+</script>

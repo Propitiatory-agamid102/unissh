@@ -1,0 +1,200 @@
+# =============================================================================
+# UniSSH — PRODUCTION compose stack (repo root).
+#
+#   docker compose up -d --build
+#
+# Build context is the REPO ROOT (".") for BOTH images so that rust-core/,
+# server/ and server-ui/ are all present in a single context:
+#   * server image    -> server/Dockerfile COPYs rust-core/ + server/
+#                        (server's dev-deps reference ../rust-core at manifest
+#                         parse time, so rust-core MUST be in context).
+#   * caddy/SPA image -> deploy/Caddy.Dockerfile builds crypto-wasm
+#                        (path-dep ../../rust-core/crates/crypto) + the Vite SPA.
+#
+# Topology:
+#   caddy   -> the ONLY host-exposed service (80/443). Terminates TLS (ACME or
+#              internal CA), serves the SPA same-origin and reverse-proxies the
+#              API (/v1, /healthz, /readyz) to the server over the compose net.
+#   server  -> plain HTTP on the INTERNAL network only (NOT host-published).
+#              tls_cert/tls_key empty => TlsPlan::Plain, trust_proxy=true.
+#              Metrics on :9090 internal-only (never host-published).
+#
+# Profiles (off by default):
+#   postgres   -> adds a postgres service + a one-shot migrate init container.
+#                 You ALSO need .env to flip UNISSH__DB__BACKEND/URL — compose
+#                 profiles cannot rewrite the default service env (see README).
+#   monitoring -> adds prometheus scraping server:9090.
+#
+# Secrets come from .env (gitignored). See deploy/.env.example.
+# =============================================================================
+
+name: unissh
+
+services:
+  # ---------------------------------------------------------------------------
+  # Caddy: TLS terminator + SPA static host + API reverse proxy.
+  # The only service that publishes host ports.
+  # ---------------------------------------------------------------------------
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/Caddy.Dockerfile
+    image: unissh-caddy:latest
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    environment:
+      # Site address. Real domain => automatic ACME. A *.local host or an IP,
+      # combined with UNISSH_TLS_MODE=internal, => Caddy internal CA (self-signed).
+      UNISSH_DOMAIN: "${UNISSH_DOMAIN:?set UNISSH_DOMAIN in .env}"
+      # Single TLS knob (see deploy/Caddyfile / .env.example):
+      #   ""                     -> automatic public ACME, no account email (default)
+      #   "tls you@example.com"  -> automatic public ACME with an account email
+      #   "tls internal"         -> Caddy internal CA / self-signed (LAN, air-gapped)
+      UNISSH_TLS_DIRECTIVE: "${UNISSH_TLS_DIRECTIVE:-}"
+    volumes:
+      - caddy-data:/data       # ACME certs / internal CA root — must persist.
+      - caddy-config:/config
+    networks:
+      - unissh
+
+  # ---------------------------------------------------------------------------
+  # UniSSH server: plain HTTP behind Caddy, SQLite default. Internal-only.
+  #
+  # NOTE: gcr.io/distroless/cc-debian12 has NO shell and NO curl/wget, so this
+  # service intentionally has NO HEALTHCHECK. Health is observed at the proxy
+  # (Caddy proxies /readyz + health-checks the upstream). See deploy/README.md.
+  # ---------------------------------------------------------------------------
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: unissh-server:latest
+    restart: unless-stopped
+    # No host port mapping — reachable only as http://server:8443 on the net.
+    expose:
+      - "8443"
+      - "9090"
+    environment:
+      # --- Listener (plain HTTP; TLS terminates at Caddy) ---
+      UNISSH__SERVER__BIND: "0.0.0.0:8443"
+      UNISSH__SERVER__TLS_CERT: ""
+      UNISSH__SERVER__TLS_KEY: ""
+      UNISSH__SERVER__TRUST_PROXY: "true"
+      # acme left unset/false on purpose: acme=true is a hard startup error.
+      # --- Database (SQLite default; Postgres via the `postgres` profile + .env override) ---
+      UNISSH__DB__BACKEND: "${UNISSH__DB__BACKEND:-sqlite}"
+      UNISSH__DB__URL: "${UNISSH__DB__URL:-/app/data/unissh.db}"
+      # --- Observability (metrics internal-only on :9090; never host-published) ---
+      UNISSH__OBS__LOG_FORMAT: "json"
+      UNISSH__OBS__METRICS_BIND: "0.0.0.0:9090"
+      # --- Secrets (from .env) ---
+      UNISSH__BOOTSTRAP__TOKEN: "${UNISSH__BOOTSTRAP__TOKEN:-}"
+      UNISSH__BOOTSTRAP__DEFAULT_TIER: "${UNISSH__BOOTSTRAP__DEFAULT_TIER:-personal}"
+      UNISSH__OPS__TOKEN: "${UNISSH__OPS__TOKEN:-}"
+    volumes:
+      - unissh-data:/app/data        # SQLite db; owned by uid 65532 (distroless nonroot).
+    read_only: true                  # immutable rootfs; only the named volume + tmpfs are writable.
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - unissh
+
+  # ---------------------------------------------------------------------------
+  # Postgres (profile: postgres). Off by default.
+  # This profile REQUIRES POSTGRES_PASSWORD to be set in .env. The default
+  # (SQLite) path needs none.
+  # To actually USE Postgres you must ALSO set in .env:
+  #   POSTGRES_PASSWORD=<pw>
+  #   UNISSH__DB__BACKEND=postgres
+  #   UNISSH__DB__URL=postgres://unissh:<pw>@postgres:5432/unissh
+  # (compose profiles cannot rewrite the default `server` env — see README).
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-unissh}"
+      # The `postgres` profile REQUIRES POSTGRES_PASSWORD to be set in .env.
+      # We use the non-failing `:-` form (empty default) so the DEFAULT (SQLite)
+      # config still resolves WITHOUT a .env even though this profile-gated
+      # service is parsed. If the postgres profile is actually activated with an
+      # empty password, the postgres:16 image itself refuses to start (fails
+      # loud) — that is acceptable. See deploy/.env.example / deploy/README.md.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_DB: "${POSTGRES_DB:-unissh}"
+    volumes:
+      - unissh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-unissh} -d ${POSTGRES_DB:-unissh}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - unissh
+
+  # ---------------------------------------------------------------------------
+  # One-shot migrate init container (profile: postgres).
+  # Runs `unissh-server migrate` against Postgres once it is healthy, BEFORE the
+  # long-running server connects. Reuses the same image. (SQLite needs no init
+  # container — the server auto-migrates on boot via build_state -> migrate.)
+  # ---------------------------------------------------------------------------
+  unissh-server-migrate:
+    image: unissh-server:latest
+    profiles: ["postgres"]
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UNISSH__DB__BACKEND: "postgres"
+      # Single source of truth: compose the DSN from the same POSTGRES_* vars the
+      # postgres service uses, so credentials never drift. An explicit
+      # UNISSH__DB__URL in .env still overrides this composed default.
+      UNISSH__DB__URL: "${UNISSH__DB__URL:-postgres://${POSTGRES_USER:-unissh}:${POSTGRES_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-unissh}}"
+      UNISSH__OBS__LOG_FORMAT: "json"
+    entrypoint: ["/usr/local/bin/unissh-server"]
+    command: ["migrate", "--config", "/app/config.toml"]
+    networks:
+      - unissh
+
+  # ---------------------------------------------------------------------------
+  # Prometheus (profile: monitoring). Scrapes server:9090 over the compose net.
+  # Not host-published by default; uncomment ports for local access.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    # ports:
+    #   - "9091:9090"   # optional: expose Prometheus UI on host :9091
+    networks:
+      - unissh
+
+networks:
+  unissh:
+    driver: bridge
+
+volumes:
+  unissh-data:        # SQLite database (default backend).
+  unissh-pg:          # Postgres data (profile: postgres).
+  caddy-data:         # ACME certificates / internal CA root — MUST persist.
+  caddy-config:
+  prometheus-data:    # Prometheus TSDB (profile: monitoring).

@@ -1,0 +1,56 @@
+# cargo-deny — supply-chain gate for a crypto/SSH core.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+# Re-homed from rust-core/deny.toml to the workspace root (its original scope).
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # RSA "Marvin" timing sidechannel. No patched `rsa` release exists; it is
+    # pulled in transitively to support SSH RSA keys (host + user), which an SSH
+    # client cannot drop. NOTE: `rsa` is reached via TWO paths — `ssh-key` 0.6 in
+    # `unissh-ssh-agent` AND a pre-release `ssh-key` inside `russh` — so removing
+    # russh alone does NOT clear this advisory. The exposure is bounded to the SSH
+    # device->host path (the vault/sync crypto core is rsa-free); we recommend
+    # Ed25519/ECDSA user keys. Revisit when upstream ships a constant-time `rsa`.
+    # russh 0.61 also transitively pulls pre-release (rc) RustCrypto crates for the
+    # SSH session crypto — track upstream for a release on stabilized deps.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    # webpki-roots ships its trust-store data under CDLA-Permissive-2.0
+    # (pulled in transitively via sqlx -> unissh-server).
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+# "warn" (not "deny"): the SSH stack (russh rc-tree), sqlx, and uniffi/figment
+# (toml/winnow) inherently pull duplicate minor versions of low-level crates, and
+# denying would block routine updates. The skip-tree below silences the known,
+# accepted duplicate roots so a genuinely NEW duplicate still shows up as signal
+# rather than being lost among the pre-accepted ones.
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+skip-tree = [
+    # winnow 0.7.x (askama/toml_edit) vs 1.x (toml_parser) via uniffi/figment.
+    { name = "winnow" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

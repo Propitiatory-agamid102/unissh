@@ -1,0 +1,9 @@
+# build context is the parent dir; exclude heavy/regenerable artifacts
+**/target
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/data
+**/.git
+**/secrets
+**/*.pem

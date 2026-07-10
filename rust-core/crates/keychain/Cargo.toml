@@ -1,0 +1,27 @@
+[package]
+name = "unissh-keychain"
+version = "0.1.0"
+description = "Иерархия ключей UniSSH (ТЗ 5.1): Secret Key, Argon2id, Unlock Key, личный keyset под Unlock Key."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+unissh-crypto = { path = "../crypto" }
+unissh-storage = { path = "../storage" }
+# VETTED PAKE (SPAKE2, Ed25519Group) for device-to-device onboarding — NOT our own crypto.
+# The choice is justified in the P5 plan: RustCrypto-aligned (curve25519-dalek 4.x, rand_core 0.6,
+# hkdf 0.12, sha2 0.10, subtle 2.6 — 1:1 with the workspace), battle-tested by magic-wormhole.rs.
+spake2 = "0.4"
+# Key-confirmation tag over the channel key (HMAC-SHA256) + constant-time comparison.
+hmac = "0.12"
+subtle = "2"
+# HKDF for combine(Argon2id(pw), SecretKey) → Unlock Key
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+thiserror = "2"

@@ -1,0 +1,25 @@
+[package]
+name = "unissh-sync"
+version = "0.1.0"
+description = "Клиентский sync-движок UniSSH: pull/push/дельта, verify-before-apply, signed-version LWW, surfacing конфликтов, anti-rollback курсор (server-tz §3/§9/§1.1). Транспорт недоверенный; реальной сети/сервера в этом крейте нет."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+unissh-crypto = { path = "../crypto" }
+unissh-storage = { path = "../storage" }
+unissh-vault = { path = "../vault" }
+unissh-keychain = { path = "../keychain" }
+thiserror = "2"
+zeroize = "1.8"
+# Logging facade — push/pull + conflict diagnostics. Open ids/counters only,
+# never object plaintext or key material.
+log = "0.4"
+
+[dev-dependencies]
+unissh-crypto = { path = "../crypto" }
+unissh-keychain = { path = "../keychain" }

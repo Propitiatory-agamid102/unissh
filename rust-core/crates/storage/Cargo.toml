@@ -1,0 +1,22 @@
+[package]
+name = "unissh-storage"
+version = "0.1.0"
+description = "UniSSH local encrypted storage (SQLite+SQLCipher): instance isolation, item/vault/version/tombstone/signature model designed for future sync."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# SQLite + SQLCipher, built from source, linked against the system OpenSSL.
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }
+thiserror = "2"
+zeroize = "1.8"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# Raw connection for the upgrade test (we build a v3 DB before Storage::open).
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }

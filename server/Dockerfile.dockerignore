@@ -1,0 +1,11 @@
+# BuildKit honors <dockerfile>.dockerignore; patterns relative to the build
+# context (parent dir containing server/ and rust-core/).
+**/target
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/data
+**/.git
+**/secrets
+**/*.pem
+rust-core/docs

@@ -1,0 +1,233 @@
+/* Global base + motion — ported from the prototype's index <style>. */
+
+:root {
+  --uh-focus: #5b8cff;
+  --uh-desk: #08090d;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--uh-desk);
+  overflow: hidden;
+  /* contain the WKWebView/Android rubber-band so the whole shell can't bounce */
+  overscroll-behavior: none;
+  /* stop iOS/Android from auto-inflating body text in landscape */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* kill the default grey tap flash on every touch */
+  -webkit-tap-highlight-color: transparent;
+  font-family: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+* {
+  box-sizing: border-box;
+}
+#root {
+  height: 100vh;
+  height: 100dvh;
+  overscroll-behavior: none;
+}
+
+/* Mobile shell: a fixed, full-viewport column. Size it to the DYNAMIC viewport
+   (`dvh`) instead of `inset: 0` — on iOS a fixed box with `inset: 0` resolves
+   against the large/fixed viewport and leaves a dead band (~20% of the screen)
+   where the browser chrome would be; `100dvh` tracks the currently-visible
+   viewport, so the shell fills exactly what the user sees on every device.
+   `100vh` is the pre-`dvh` fallback (iOS < 15.4). Desktop never gets this class
+   — it renders the desktop Shell, not MobileApp — so this can't affect desktop. */
+.mobile-shell {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  /* dvh = the usable WebView content area (measured 839 of a 932px screen on
+     iOS). 100svh/100vh report the full frame (932) but that OVERSHOOTS the
+     content area and the WebView clips the tab bar, so dvh is the correct max.
+     The ~93px below the content area is a native safe-area/contentInset region
+     the web layer can't draw into — fixing it needs the iOS project config. */
+  height: 100vh; /* fallback (older WebViews) */
+  height: 100dvh;
+}
+
+/* Touch press feedback: hover states never fire on touch, so give every button a
+   uniform pressed cue on coarse pointers (real phones), without dimming on desktop. */
+@media (hover: none) and (pointer: coarse) {
+  button:active,
+  [role="button"]:active {
+    opacity: 0.55;
+  }
+  /* iOS long-press on chrome pops the selection magnifier / callout and can start
+     a text selection while scrolling. Suppress it on the app shell, but keep real
+     text selectable where it matters (inputs, the terminal, anything opted-in). */
+  * {
+    -webkit-touch-callout: none;
+  }
+  button,
+  [role="button"],
+  a {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  input,
+  textarea,
+  .xterm,
+  .xterm *,
+  [contenteditable],
+  .uh-selectable {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+  /* iOS auto-zooms when a focused field is < 16px. With pinch-zoom re-enabled
+     this would lurch the page on every form focus, so force the threshold on
+     touch devices regardless of each field's inline font-size. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 160, 190, 0.25);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 160, 190, 0.4);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* keyframes */
+@keyframes uhPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+}
+@keyframes uhToast {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes uhPop {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes uhFade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes uhRise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes uhSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.uh-view {
+  animation: uhFade 0.26s ease-out;
+}
+.uh-stagger > * {
+  animation: uhRise 0.32s cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  .uh-view,
+  .uh-stagger > * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+button,
+[role="button"],
+input,
+a {
+  outline: none;
+}
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+input:focus-visible,
+a:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--uh-focus, #5b8cff);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* let the title bar drag the window (Tauri) without selecting text */
+.uh-drag {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+button {
+  font-family: inherit;
+}
+
+/* xterm fills its container; we theme it per terminal palette at runtime */
+.xterm,
+.xterm-viewport {
+  width: 100%;
+  height: 100%;
+}
+/* xterm.css hard-codes `.xterm .xterm-viewport` to `background-color: #000`, so the
+   strip below the last row (the sub-row remainder + scroll gutter) paints pure
+   black — a black bar between the terminal output and the status bar.
+   Override it to transparent (same specificity + !important) so the terminal
+   pane's themed background (termTheme.bg) shows through instead. */
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}

@@ -1,0 +1,60 @@
+---
+/**
+ * Inline SVG icon. Glyph paths ported 1:1 from the product's
+ * client/src/components/primitives.tsx ICONS map so the site
+ * uses the exact same line-art as the apps.
+ */
+interface Props {
+  name: string;
+  size?: number;
+  stroke?: number;
+  class?: string;
+  title?: string;
+}
+
+const { name, size = 22, stroke = 1.6, class: className, title } = Astro.props;
+
+const ICONS: Record<string, string> = {
+  server:
+    '<rect x="2.5" y="3" width="19" height="7.5" rx="2"/><rect x="2.5" y="13.5" width="19" height="7.5" rx="2"/><circle cx="6" cy="6.75" r="0.6" fill="currentColor" stroke="none"/><circle cx="6" cy="17.25" r="0.6" fill="currentColor" stroke="none"/>',
+  key: '<circle cx="7.5" cy="16" r="3.6"/><path d="M10.3 13.4 20 3.7"/><path d="M17 6.7l2.3 2.3"/><path d="M14.2 9.5l2 2"/>',
+  lock: '<rect x="4.5" y="11" width="15" height="9.5" rx="2.2"/><path d="M8 11V7.3a4 4 0 0 1 8 0V11"/>',
+  folder:
+    '<path d="M4 6.5a2 2 0 0 1 2-2h3.7l2 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
+  terminal: '<polyline points="5 7 10 12 5 17"/><line x1="12" y1="17" x2="19" y2="17"/>',
+  globe:
+    '<circle cx="12" cy="12" r="8.5"/><line x1="3.5" y1="12" x2="20.5" y2="12"/><path d="M12 3.5c2.4 2.3 3.7 5.3 3.7 8.5S14.4 18.2 12 20.5C9.6 18.2 8.3 15.2 8.3 12S9.6 5.8 12 3.5z"/>',
+  shield:
+    '<path d="M12 3l7.5 2.8v5.7c0 4.3-3.2 7.5-7.5 8.7-4.3-1.2-7.5-4.4-7.5-8.7V5.8z"/>',
+  layers:
+    '<polygon points="12 2.5 21 7 12 11.5 3 7 12 2.5"/><polyline points="3 12 12 16.5 21 12"/><polyline points="3 17 12 21.5 21 17"/>',
+  download:
+    '<path d="M12 3.5v11"/><polyline points="7.5 10.5 12 15 16.5 10.5"/><path d="M5 20.5h14"/>',
+  branch:
+    '<line x1="6" y1="4.5" x2="6" y2="14"/><circle cx="6" cy="17.5" r="2.6"/><circle cx="18" cy="6.5" r="2.6"/><path d="M18 9.1c0 5-4 7.4-9 7.4"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><polyline points="12 7 12 12 15.5 14"/>',
+  link: '<path d="M9.5 14.5 14.5 9.5"/><path d="M8 12 6 14a3.5 3.5 0 0 0 5 5l2-2"/><path d="M16 12l2-2a3.5 3.5 0 0 0-5-5l-2 2"/>',
+  check: '<polyline points="4 12.5 9.5 18 20 6"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4.5a1.5 1.5 0 0 1-1.5-1.5V4.5A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/>',
+  github:
+    '<path d="M12 2.5a9.5 9.5 0 0 0-3 18.5c.5.1.65-.2.65-.45v-1.7c-2.65.55-3.2-1.15-3.2-1.15-.45-1.1-1.05-1.4-1.05-1.4-.85-.6.07-.6.07-.6.95.07 1.45.95 1.45.95.85 1.45 2.2 1.05 2.75.8.1-.6.35-1.05.6-1.3-2.1-.25-4.3-1.05-4.3-4.65 0-1.05.35-1.85.95-2.5-.1-.25-.4-1.2.1-2.5 0 0 .8-.25 2.6.95a9 9 0 0 1 4.7 0c1.8-1.2 2.6-.95 2.6-.95.5 1.3.2 2.25.1 2.5.6.65.95 1.45.95 2.5 0 3.6-2.2 4.4-4.3 4.65.35.3.65.9.65 1.8v2.65c0 .25.15.55.65.45A9.5 9.5 0 0 0 12 2.5z" fill="currentColor" stroke="none"/>',
+};
+
+const path = ICONS[name] ?? '';
+---
+
+<svg
+  width={size}
+  height={size}
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width={stroke}
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  class={className}
+  role={title ? 'img' : 'presentation'}
+  aria-hidden={title ? undefined : 'true'}
+  aria-label={title}
+  set:html={path}
+/>

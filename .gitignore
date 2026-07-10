@@ -1,0 +1,133 @@
+# ============================================================
+# Rust  (github/gitignore: Rust.gitignore)
+# ============================================================
+debug/
+target/
+**/*.rs.bk
+*.pdb
+# NB: we do NOT ignore Cargo.lock — the repo ships binaries (server, cli, tauri-app).
+
+# ============================================================
+# Node / JS  (github/gitignore: Node.gitignore)
+# ============================================================
+node_modules/
+jspm_packages/
+web_modules/
+dist/
+dist-ssr/
+build/Release/
+out/
+*.tsbuildinfo
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.npm
+.eslintcache
+.stylelintcache
+.cache/
+.parcel-cache/
+.vite/
+coverage/
+*.lcov
+.nyc_output/
+pids/
+*.pid
+*.seed
+*.pid.lock
+*.tgz
+.yarn-integrity
+.node_repl_history
+# NB: we do NOT ignore package-lock.json — we pin the frontend versions.
+
+# ============================================================
+# Python (helper scripts in scripts/)
+# ============================================================
+__pycache__/
+*.pyc
+
+# ============================================================
+# dotenv / secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+!.env.localhost
+secrets/
+*.pem
+*.key
+
+# ============================================================
+# Tauri / Vite (project-specific)
+# ============================================================
+*/src-tauri/gen/
+.i18n-slices/
+.i18n-assemble.mjs
+
+# ============================================================
+# WASM (server-ui/crypto-wasm — pkg is built via wasm-pack)
+# ============================================================
+server-ui/crypto-wasm/pkg/
+server-ui/crypto-wasm/pkg-node/
+server-ui/crypto-wasm/target/
+
+# ============================================================
+# Server runtime (SQLite/Postgres data) + design sources
+# ============================================================
+/server/data/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+server-ui/_design/
+server-ui/_design_raw.html
+
+# ============================================================
+# macOS
+# ============================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+
+# ============================================================
+# Windows
+# ============================================================
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ============================================================
+# Linux
+# ============================================================
+*~
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================
+# Editors / IDE
+# ============================================================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*.swn
+*.bak
+.#*
+\#*\#
+*.sublime-workspace

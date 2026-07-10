@@ -1,0 +1,62 @@
+# UniSSH Server — example configuration (spec §14.2).
+# Hierarchy: defaults → this TOML → env (UNISSH__SECTION__KEY=...).
+# Secrets (tls_key, postgres url, bootstrap token) — via env/Docker secret.
+
+[server]
+bind = "0.0.0.0:8443"
+# In-process TLS 1.3 (rustls). Leave empty + trust_proxy=true for termination
+# on a reverse-proxy (nginx/caddy).
+tls_cert = "/secrets/cert.pem"
+tls_key  = "/secrets/key.pem"
+trust_proxy = false
+acme = false                      # in-process ACME is NOT built in: acme=true → startup
+                                  # refusal. Use a reverse-proxy (Caddy/nginx)
+                                  # or tls_cert+tls_key.
+
+[db]
+backend = "sqlite"                # "sqlite" | "postgres"
+url = "/app/data/unissh.db"       # sqlite: path to file (or ":memory:"); postgres: postgres://user:pass@host/db
+max_connections = 16
+
+[limits]
+max_body_bytes = 16777216         # 16 MiB
+max_object_bytes = 1048576        # 1 MiB
+max_objects_per_push = 1000
+delta_page_size = 500
+delta_max_page_size = 1000
+rate_limit_per_ip_rps = 20
+rate_limit_burst = 40
+
+[sync]
+freshness_window_seconds = 30     # W for online-only live grants (§9.7)
+validate_signatures = true        # §2.4 defense-in-depth (org-tier write-accept)
+min_instance_generation = 0       # §16 anti-rollback floor (Σ next_seq); 0 = off,
+                                  # anchor outside the DB; the server won't start if below
+
+[session]
+access_ttl_seconds = 900
+refresh_ttl_seconds = 2592000
+nonce_ttl_seconds = 120
+invite_default_ttl_seconds = 86400
+relay_ttl_seconds = 120
+janitor_interval_seconds = 300
+idempotency_ttl_seconds = 86400
+
+[obs]
+log_format = "json"               # "json" | "text"
+otel_endpoint = ""                # OTLP export is NOT compiled in: if set — warn
+                                  # at startup. Metrics: /metrics; tracing: logs/sidecar.
+metrics_bind = "127.0.0.1:9090"
+
+[bootstrap]
+# Global bootstrap token (base64). Empty + allow_open=false → bootstrap is closed.
+# Set via env: UNISSH__BOOTSTRAP__TOKEN=...
+token = ""
+allow_open = false
+default_tier = "personal"         # "personal" | "org"
+
+[ops]
+# Operator token for cross-tenant /v1/ops/* (X-UniSSH-Ops-Token header).
+# Empty → ops surface is DISABLED. Set via env: UNISSH__OPS__TOKEN=...
+# This is server-trusted infrastructure access (tenants/suspend/seq-bump), NOT a keyset.
+token = ""

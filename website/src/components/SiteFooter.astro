@@ -1,0 +1,82 @@
+---
+interface Props {
+  links: {
+    overview: string;
+    quickstart: string;
+    install: string;
+    arch: string;
+    security: string;
+    crates: string;
+    server: string;
+    deploy: string;
+    github: string;
+    githubReleases: string;
+  };
+}
+const { links } = Astro.props;
+
+const columns = [
+  {
+    title: 'Product',
+    items: [
+      { label: 'Overview', href: links.overview },
+      { label: 'Features', href: '#features' },
+      { label: 'Download', href: '#download' },
+    ],
+  },
+  {
+    title: 'Docs',
+    items: [
+      { label: 'Quickstart', href: links.quickstart },
+      { label: 'Architecture', href: links.arch },
+      { label: 'Security', href: links.security },
+      { label: 'Crate reference', href: links.crates },
+      { label: 'Operations', href: links.deploy },
+    ],
+  },
+  {
+    title: 'Project',
+    items: [
+      { label: 'GitHub', href: links.github },
+      { label: 'Releases', href: links.githubReleases },
+      { label: 'License (MIT OR Apache-2.0)', href: links.github },
+    ],
+  },
+];
+---
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer__top">
+      <div class="footer__brand">
+        <a class="brand" href="#top" aria-label="UniSSH home">
+          <span class="brand__glyph" aria-hidden="true">›_</span>
+          <span class="brand__name">Uni<span class="accent">SSH</span></span>
+        </a>
+        <p>The SSH client that never trusts the server.</p>
+      </div>
+
+      {
+        columns.map((col) => (
+          <nav class="footer__col" aria-label={col.title}>
+            <h4>{col.title}</h4>
+            <ul>
+              {col.items.map((it) => (
+                <li>
+                  <a href={it.href} rel={it.href.startsWith('http') ? 'noopener' : undefined}>
+                    {it.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ))
+      }
+    </div>
+
+    <div class="footer__bottom">
+      <p>Open-source, self-hosted, zero-knowledge.</p>
+      <p>MIT OR Apache-2.0</p>
+    </div>
+  </div>
+</footer>

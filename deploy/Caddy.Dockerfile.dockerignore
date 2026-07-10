@@ -1,0 +1,28 @@
+# BuildKit honors <dockerfile>.dockerignore. Patterns are relative to the build
+# context (the REPO ROOT). Keep the SPA/wasm build context lean: the Caddy image
+# only needs rust-core/crates/crypto, server-ui/, and deploy/.
+**/node_modules
+**/target
+**/dist
+**/dist-ssr
+**/.vite
+**/.git
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/data
+**/secrets
+**/*.pem
+**/*.key
+.env
+.env.*
+!.env.example
+
+# Stale prebuilt wasm — rebuilt in-image by the wasm stage.
+server-ui/crypto-wasm/pkg
+server-ui/crypto-wasm/pkg-node
+
+# Not needed for the SPA/Caddy image.
+client/
+server/
+rust-core/docs/

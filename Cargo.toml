@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["rust-core/crates/*", "server"]
+exclude = ["client/src-tauri", "server-ui/crypto-wasm"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+authors = ["UniSSH"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/goduni/unissh"
+
+# Profile for tests: Argon2id with production parameters (64 MiB) is slow in debug,
+# so we optimize dependencies even in dev (ported from rust-core).
+[profile.dev.package."*"]
+opt-level = 2

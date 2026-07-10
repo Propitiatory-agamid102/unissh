@@ -1,0 +1,297 @@
+// Tunnels — port forwarding manager (-L / -R / -D). Pixel-faithful port of
+// view-tunnels.jsx; mock data replaced with the real store registry. The core
+// has no tunnel registry, so active tunnels live in the app store and only
+// until the instance is locked. Turning a tunnel OFF closes it on the core and
+// drops it from the list (re-enabling means re-opening via the modal).
+
+import { usePalette } from "@/theme/ThemeProvider";
+import { MONO, rgba } from "@/theme/tokens";
+import type { Palette } from "@/theme/tokens";
+import { Btn, Icon, Toggle } from "@/components/primitives";
+import { useApp } from "@/store/app";
+import { useCtx } from "@/store/ctx";
+import { useIsMobile } from "@/store/responsive";
+import * as api from "@/bridge/api";
+import { apiErrorMessage } from "@/bridge/types";
+import type { ActiveTunnel, TunnelType } from "@/store/app";
+import { useTranslation, tDyn } from "@/i18n";
+
+interface TypeMeta {
+  letter: "L" | "R" | "D";
+  nameKey: string;
+  /** Palette token, not a raw hex — Candy/light themes get their own hues. */
+  colorKey: "accent" | "purple" | "green";
+}
+
+const TYPE_META: Record<TunnelType, TypeMeta> = {
+  local: { letter: "L", nameKey: "tunnels.type.local", colorKey: "accent" },
+  remote: { letter: "R", nameKey: "tunnels.type.remote", colorKey: "purple" },
+  dynamic: { letter: "D", nameKey: "tunnels.type.dynamic", colorKey: "green" },
+};
+const typeColor = (p: Palette, m: TypeMeta): string => p[m.colorKey];
+
+function TunnelRow({ t: tun }: { t: ActiveTunnel }) {
+  const { t } = useTranslation();
+  const p = usePalette();
+  const ctx = useCtx();
+  const isMobile = useIsMobile();
+  const m = TYPE_META[tun.type];
+  const mColor = typeColor(p, m);
+
+  const turnOff = async () => {
+    try {
+      await api.tunnelClose(tun.id);
+      useApp.getState().removeTunnel(tun.id);
+      ctx.toast(t("tunnels.toastClosed"), "ok");
+    } catch (e) {
+      ctx.toast(apiErrorMessage(e), "err");
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        flexDirection: "row",
+        flexWrap: isMobile ? "wrap" : "nowrap",
+        gap: isMobile ? "10px 12px" : 16,
+        padding: "14px 16px",
+        borderRadius: 13,
+        background: p.bg1,
+        border: `1px solid ${tun.on ? p.line2 : p.line}`,
+        opacity: tun.on ? 1 : 0.7,
+      }}
+    >
+      <span
+        style={{
+          width: 44,
+          height: 44,
+          borderRadius: 12,
+          background: rgba(mColor, 0.14),
+          border: `1px solid ${rgba(mColor, 0.4)}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontFamily: MONO,
+          fontWeight: 800,
+          fontSize: 17,
+          color: mColor,
+          flexShrink: 0,
+          ...(isMobile ? { order: 0 } : null),
+        }}
+      >
+        {m.letter}
+      </span>
+      <div style={{ ...(isMobile ? { flex: 1, minWidth: 0, order: 1 } : { width: 150, flexShrink: 0 }) }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700 }}>{tun.label}</div>
+        <div style={{ fontSize: 11.5, color: p.txt3 }}>{tDyn(m.nameKey)}</div>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          flexWrap: isMobile ? "wrap" : "nowrap",
+          gap: 10,
+          fontFamily: MONO,
+          fontSize: 12.5,
+          minWidth: 0,
+          ...(isMobile ? { order: 4, flexBasis: "100%" } : null),
+        }}
+      >
+        <span
+          style={{
+            color: p.txt,
+            background: p.bg3,
+            border: `1px solid ${p.line}`,
+            borderRadius: 7,
+            padding: "4px 9px",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {tun.bindAddress}
+        </span>
+        <Icon name="ar" size={15} color={mColor} />
+        <span
+          style={{
+            color: p.txt,
+            background: p.bg3,
+            border: `1px solid ${p.line}`,
+            borderRadius: 7,
+            padding: "4px 9px",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {tun.route}
+        </span>
+        {tun.via && (
+          <span
+            style={{
+              color: p.txt3,
+              fontSize: 11.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <Icon name="branch" size={12} color={p.purple} />
+            {t("tunnels.via", { via: tun.via })}
+          </span>
+        )}
+      </div>
+      <span
+        style={{
+          fontFamily: MONO,
+          fontSize: 11.5,
+          color: p.txt3,
+          textAlign: "right",
+          ...(isMobile ? { width: "auto", order: 2, flexShrink: 0 } : { width: 64 }),
+        }}
+      >
+        {tun.on ? t("tunnels.active") : t("tunnels.off")}
+      </span>
+      {/* OFF means destroyed: the core closed the tunnel and re-enabling means
+          re-opening via the modal, so the off switch is inert (aria-disabled). */}
+      <span style={{ display: "inline-flex", flexShrink: 0, ...(isMobile ? { order: 3 } : null) }}>
+        <Toggle
+          checked={tun.on}
+          disabled={!tun.on}
+          touch={isMobile}
+          onChange={(v) => {
+            if (!v) void turnOff();
+          }}
+          title={tun.on ? t("tunnels.closeTooltip") : undefined}
+          aria-label={tun.on ? t("tunnels.closeTooltip") : t("tunnels.off")}
+        />
+      </span>
+    </div>
+  );
+}
+
+export function ViewTunnels() {
+  const { t } = useTranslation();
+  const p = usePalette();
+  const ctx = useCtx();
+  const isMobile = useIsMobile();
+  const tunnels = useApp((s) => s.tunnels);
+  const activeCount = tunnels.filter((tun) => tun.on).length;
+
+  return (
+    // Entry motion comes from the uh-stagger row rise below — no root fade on top.
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        minWidth: 0,
+        background: p.bg0,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: isMobile ? "wrap" : "nowrap",
+          gap: 10,
+          padding: isMobile ? "16px 16px 12px" : "16px 22px 12px",
+        }}
+      >
+        <Icon name="branch" size={20} color={p.accent} />
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: -0.5 }}>{t("nav.tunnels")}</h1>
+        <span
+          style={{
+            fontFamily: MONO,
+            fontSize: 12,
+            color: p.txt2,
+            background: p.bg2,
+            border: `1px solid ${p.line}`,
+            borderRadius: 20,
+            padding: "2px 9px",
+          }}
+        >
+          {t("count.tunnelsActive", { count: activeCount })}
+        </span>
+        <div style={{ flex: 1 }} />
+        <Btn icon="plus" size="sm" onClick={() => ctx.openModal({ kind: "tunnel" })}>
+          {t("tunnels.newTunnel")}
+        </Btn>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          overflow: "auto",
+          padding: isMobile ? "4px 16px 18px" : "4px 22px 18px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 11,
+        }}
+      >
+        {tunnels.length === 0 ? (
+          <div
+            style={{
+              flex: 1,
+              minHeight: 240,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+            }}
+          >
+            <span
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 16,
+                background: p.bg2,
+                border: `1px solid ${p.line}`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Icon name="branch" size={26} color={p.txt3} />
+            </span>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: p.txt }}>{t("tunnels.emptyTitle")}</div>
+              <div style={{ fontSize: 13, color: p.txt3, marginTop: 3 }}>
+                {t("tunnels.emptyHint")}
+              </div>
+            </div>
+            <Btn size="sm" icon="plus" onClick={() => ctx.openModal({ kind: "tunnel" })}>
+              {t("tunnels.newTunnel")}
+            </Btn>
+          </div>
+        ) : (
+          <div className="uh-stagger" style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+            {tunnels.map((tun) => (
+              <TunnelRow key={tun.id} t={tun} />
+            ))}
+          </div>
+        )}
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginTop: 4,
+            padding: 14,
+            borderRadius: 13,
+            border: `1px dashed ${p.line2}`,
+            color: p.txt3,
+            fontSize: 12.5,
+          }}
+        >
+          <Icon name="alert" size={15} color={p.txt3} style={{ flexShrink: 0 }} />
+          {t("tunnels.footerNote")}
+        </div>
+      </div>
+    </div>
+  );
+}

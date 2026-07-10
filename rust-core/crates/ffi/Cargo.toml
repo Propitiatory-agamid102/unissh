@@ -1,0 +1,49 @@
+[package]
+name = "unissh-ffi"
+version = "0.1.0"
+description = "UniSSH core FFI boundary (UniFFI): instances, unlock, vault/item CRUD, launching SSH sessions/tunnels. The UI never receives plaintext keys (spec 4)."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "unissh_ffi"
+# staticlib/cdylib: native artifacts for generating UniFFI bindings via
+# `uniffi-bindgen --library` (introspection) and possible native UIs.
+# lib (rlib) — using the crate within the workspace (Tauri client, the uniffi-bindgen binary, tests).
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+unissh-crypto = { path = "../crypto" }
+unissh-keychain = { path = "../keychain" }
+unissh-storage = { path = "../storage" }
+unissh-vault = { path = "../vault" }
+unissh-ssh-agent = { path = "../ssh-agent" }
+unissh-ssh-transport = { path = "../ssh-transport" }
+unissh-sync = { path = "../sync" }
+
+uniffi = { version = "0.31", features = ["cli"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+# Logging facade — events surface through whatever logger the host installs
+# (tauri-plugin-log in the app; a no-op in tests). Metadata only, never secrets.
+log = "0.4"
+hkdf = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+zeroize = "1.8"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+# In-process SSH server for password-authentication tests (hermetic).
+russh = "0.61"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }

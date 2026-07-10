@@ -1,0 +1,20 @@
+# =============================================================================
+# UniSSH — Prometheus scrape config (compose profile: monitoring).
+#
+# Scrapes the UniSSH server's metrics listener over the internal compose
+# network. The server binds UNISSH__OBS__METRICS_BIND=0.0.0.0:9090 on a separate
+# listener (path /metrics) that is NEVER host-published — reachable only as
+# server:9090 inside the `unissh` network.
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: unissh-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["server:9090"]
+        labels:
+          service: unissh-server

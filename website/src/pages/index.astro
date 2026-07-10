@@ -1,0 +1,168 @@
+---
+import '../styles/theme.css';
+import '../styles/landing.css';
+
+import SiteHeader from '../components/SiteHeader.astro';
+import HeroVisual from '../components/HeroVisual.astro';
+import TrustStrip from '../components/TrustStrip.astro';
+import FeatureGrid from '../components/FeatureGrid.astro';
+import ArchitectureDiagram from '../components/ArchitectureDiagram.astro';
+import CodeShowcase from '../components/CodeShowcase.astro';
+import SecurityStrip from '../components/SecurityStrip.astro';
+import DownloadCTA from '../components/DownloadCTA.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+
+const base = import.meta.env.BASE_URL; // '/unissh/'
+const withBase = (p: string) => `${base}${p.replace(/^\//, '')}`;
+
+// Internal doc links (base-aware).
+const overviewHref = withBase('overview/introduction/');
+const installHref = withBase('overview/install/');
+const quickstartHref = withBase('overview/quickstart/');
+const archHref = withBase('architecture/system-overview/');
+const securityHref = withBase('architecture/zero-knowledge-model/');
+const cratesHref = withBase('components/crates/');
+const clientDocHref = withBase('components/client/');
+const serverDocHref = withBase('components/server/');
+const deployHref = withBase('operations/deploy/');
+const buildHref = withBase('operations/build/');
+
+// External links.
+const githubHref = 'https://github.com/goduni/unissh';
+const githubReleases = 'https://github.com/goduni/unissh/releases';
+
+const title = 'UniSSH — the SSH client that never trusts the server';
+const description =
+  'Open-source, self-hosted, zero-knowledge SSH client with end-to-end encrypted secret vaults, fleet and broadcast ops, real terminals, SFTP and tunnels — backed by a self-hostable zero-knowledge server that only ever stores ciphertext.';
+const canonical = `${import.meta.env.SITE ?? ''}${base}`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href={withBase('favicon.svg')} type="image/svg+xml" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#08090d" />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="backdrop" aria-hidden="true"></div>
+
+    <SiteHeader
+      docsHref={overviewHref}
+      archHref={archHref}
+      securityHref={securityHref}
+      quickstartHref={quickstartHref}
+      githubHref={githubHref}
+    />
+
+    <main id="main">
+      <span id="top"></span>
+
+      <!-- Hero -->
+      <section class="hero" aria-labelledby="hero-head">
+        <div class="wrap hero__grid">
+          <div class="hero__copy reveal">
+            <span class="eyebrow">OPEN-SOURCE · SELF-HOSTED · ZERO-KNOWLEDGE</span>
+            <h1 id="hero-head">
+              The SSH client that <span class="grad-text">never trusts the server.</span>
+            </h1>
+            <p class="hero__subhead">
+              End-to-end encrypted secret vaults, fleet and broadcast ops, real terminals,
+              SFTP and tunnels — backed by a self-hostable zero-knowledge server that only
+              ever stores ciphertext.
+            </p>
+            <div class="hero__cta">
+              <a class="btn btn-primary btn-lg" href={quickstartHref}>Get started</a>
+              <a class="btn btn-ghost btn-lg" href={overviewHref}>Read the docs</a>
+            </div>
+            <div class="hero__meta">
+              <span><span class="dot is-green" aria-hidden="true"></span> 9-crate Rust core</span>
+              <span><span class="dot is-green" aria-hidden="true"></span> Tauri 2 desktop + mobile</span>
+              <span><span class="dot is-green" aria-hidden="true"></span> MIT OR Apache-2.0</span>
+            </div>
+          </div>
+
+          <div class="reveal">
+            <HeroVisual />
+          </div>
+        </div>
+      </section>
+
+      <TrustStrip />
+      <FeatureGrid />
+      <ArchitectureDiagram archHref={archHref} />
+      <CodeShowcase />
+      <SecurityStrip securityHref={securityHref} />
+      <DownloadCTA clientHref={buildHref} deployHref={deployHref} githubHref={githubHref} />
+    </main>
+
+    <SiteFooter
+      links={{
+        overview: overviewHref,
+        quickstart: quickstartHref,
+        install: installHref,
+        arch: archHref,
+        security: securityHref,
+        crates: cratesHref,
+        server: serverDocHref,
+        deploy: deployHref,
+        github: githubHref,
+        githubReleases: githubReleases,
+      }}
+    />
+
+    <script>
+      // Scroll-reveal via IntersectionObserver, gated by reduced-motion.
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const els = document.querySelectorAll<HTMLElement>('.reveal');
+      if (prefersReduced || !('IntersectionObserver' in window)) {
+        els.forEach((el) => el.classList.add('is-visible'));
+      } else {
+        const io = new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (e.isIntersecting) {
+                e.target.classList.add('is-visible');
+                io.unobserve(e.target);
+              }
+            }
+          },
+          { rootMargin: '0px 0px -8% 0px', threshold: 0.08 }
+        );
+        els.forEach((el) => io.observe(el));
+      }
+    </script>
+
+    <style>
+      .skip-link {
+        position: absolute;
+        left: -9999px;
+        top: 0;
+        z-index: 100;
+        padding: 10px 16px;
+        border-radius: 0 0 10px 0;
+        background: var(--uh-accent);
+        color: #0a0c12;
+        font-weight: 600;
+      }
+      .skip-link:focus {
+        left: 0;
+      }
+    </style>
+  </body>
+</html>

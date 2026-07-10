@@ -1,0 +1,27 @@
+[package]
+name = "unissh-ssh-transport"
+version = "0.1.0"
+description = "UniSSH SSH transport on russh: connect, authentication via the embedded agent, ProxyJump chains, forwards, TOFU/host key pinning, ssh-config import (spec 10.4)."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+unissh-ssh-agent = { path = "../ssh-agent" }
+unissh-storage = { path = "../storage" }
+russh = "0.61"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync", "fs"] }
+thiserror = "2"
+subtle = "2.6"
+zeroize = "1.8"
+# Logging facade — connect/auth diagnostics. Metadata only, never key material.
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+unissh-ssh-agent = { path = "../ssh-agent" }
+unissh-storage = { path = "../storage" }

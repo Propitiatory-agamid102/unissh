@@ -1,0 +1,39 @@
+---
+import Icon from './Icon.astro';
+
+interface Props {
+  clientHref: string;
+  deployHref: string;
+  githubHref: string;
+}
+const { clientHref, deployHref, githubHref } = Astro.props;
+---
+
+<section class="download" id="download" aria-labelledby="download-head">
+  <div class="wrap">
+    <div class="download__card reveal">
+      <span class="eyebrow">RUN IT YOURSELF</span>
+      <h2 id="download-head" style="margin-top:16px;">
+        Your servers. Your keys. <span class="grad-text">Your infrastructure.</span>
+      </h2>
+      <p>
+        Build the desktop and mobile client, or deploy the zero-knowledge server with a
+        single Docker Compose command. Everything is open source.
+      </p>
+
+      <div class="download__cta">
+        <a class="btn btn-primary btn-lg" href={clientHref}>
+          <Icon name="download" size={18} stroke={1.8} /> Build the client
+        </a>
+        <a class="btn btn-ghost btn-lg" href={deployHref}>
+          <Icon name="server" size={18} stroke={1.8} /> Deploy the server
+        </a>
+        <a class="btn btn-ghost btn-lg" href={githubHref} rel="noopener">
+          <Icon name="github" size={18} /> Browse the source
+        </a>
+      </div>
+
+      <p class="download__note">Dual-licensed · MIT OR Apache-2.0</p>
+    </div>
+  </div>
+</section>

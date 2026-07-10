@@ -1,0 +1,69 @@
+# =============================================================================
+# UniSSH — Caddy config.
+#
+# Caddy is the ONLY TLS terminator and the only host-exposed service (80/443).
+# It serves the SPA same-origin from /srv and reverse-proxies the API to the
+# internal `server` service (plain HTTP on the compose network).
+#
+# Env (set in compose / .env):
+#   UNISSH_DOMAIN        site address (real domain => ACME; *.local/IP => internal)
+#   UNISSH_TLS_DIRECTIVE single TLS knob — one of:
+#       ""                      automatic public ACME, no account email (default)
+#       "tls you@example.com"   automatic public ACME with an account email
+#       "tls internal"          Caddy internal CA / self-signed (LAN, air-gapped)
+#
+# TLS modes:
+#   ACME: Caddy obtains a public cert automatically (Let's Encrypt / ZeroSSL via
+#         HTTP-01 or TLS-ALPN-01). Port 80 is published for the challenge +
+#         HTTP->HTTPS redirect; 443 serves the app. Supplying an email via
+#         "tls you@example.com" enables expiry notices.
+#   internal ("tls internal"): Caddy issues a cert from its own internal CA
+#         (self-signed). Trust Caddy's root on clients, or accept the cert. Use
+#         for LAN hosts (*.local) or IPs with no public DNS.
+# This single placeholder covers every mode with no image rebuild.
+# =============================================================================
+{$UNISSH_DOMAIN} {
+	# --- TLS mode (see header) — empty in ACME-without-email mode. ---
+	{$UNISSH_TLS_DIRECTIVE}
+
+	# --- Security headers (applied to every response) ---
+	header {
+		# wasm-bindgen needs 'wasm-unsafe-eval'; SPA + crypto-wasm only talk to
+		# their own origin, so connect-src 'self' (same-origin proxied API).
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		# Only meaningful over HTTPS; ignored on plain HTTP.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# --- API: reverse-proxy to the internal server (plain HTTP, :8443) ---
+	# Caddy health-checks the upstream; the server itself has no HEALTHCHECK
+	# (distroless = no shell). /readyz is the readiness surface.
+	@api {
+		path /v1/* /healthz /readyz
+	}
+	# Caddy sets X-Forwarded-{For,Proto,Host} by default, which the server
+	# consumes via trust_proxy=true.
+	reverse_proxy @api server:8443 {
+		health_uri /readyz
+		health_interval 10s
+		health_timeout 5s
+	}
+
+	# --- SPA: static files from /srv with history-API fallback to index.html ---
+	root * /srv
+	encode zstd gzip
+	@notFile {
+		not path /v1/* /healthz /readyz
+		file {
+			try_files {path} /index.html
+		}
+	}
+	rewrite @notFile {http.matchers.file.relative}
+	file_server
+}

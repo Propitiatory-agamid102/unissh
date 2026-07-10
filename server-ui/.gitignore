@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+crypto-wasm/target/
+crypto-wasm/pkg-node/
+_design/
+_design_raw.html

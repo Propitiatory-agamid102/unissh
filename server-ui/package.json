@@ -1,0 +1,31 @@
+{
+  "name": "unissh-server-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "UniSSH Server — self-hosted zero-knowledge admin panel (React + Vite SPA)",
+  "scripts": {
+    "dev": "vite",
+    "build:wasm": "cd crypto-wasm && wasm-pack build --target web --out-dir pkg --release",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@fontsource/hanken-grotesk": "^5.1.0",
+    "@fontsource/jetbrains-mono": "^5.1.0",
+    "i18next": "^26.3.1",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-i18next": "^17.0.8",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6",
+    "typescript": "^6",
+    "vite": "^8.0.0"
+  }
+}
