@@ -13,6 +13,7 @@ import { useApp } from "@/store/app";
 import { useIsMobile } from "@/store/responsive";
 import { useDialogFocus, useDialogKeys } from "@/components/a11y";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import { apiErrorMessage, ItemType } from "@/bridge/types";
 import * as api from "@/bridge/api";
 
@@ -255,155 +256,155 @@ function ImportPreviewBody() {
     }
     setBusy(true);
     try {
-      const selectedSet = new Set(sel);
-      // 1) Create profiles for the SELECTED hosts only — the core imports every
-      //    Host block in whatever config text it's handed, so filter it first.
-      const filtered = filterConfigToSelected(fileText, selectedSet);
-      const created = await api.importSshConfig(vaultId, filtered);
-      const createdSet = new Set(created);
+      await guard(async () => {
+        const selectedSet = new Set(sel);
+        // 1) Create profiles for the SELECTED hosts only — the core imports every
+        //    Host block in whatever config text it's handed, so filter it first.
+        const filtered = filterConfigToSelected(fileText, selectedSet);
+        const created = await api.importSshConfig(vaultId, filtered);
+        const createdSet = new Set(created);
 
-      // 2) Import each selected host's IdentityFile key into the vault and link
-      //    it to the host. Best-effort: encrypted (passphrase) or missing keys
-      //    are skipped and the host still imports (auth falls back to a password
-      //    prompt). Desktop only — mobile has no access to ~/.ssh.
-      let keysImported = 0;
-      // Per-host skip reasons, surfaced precisely (and logged) so any future
-      // snag is visible instead of a vague "encrypted or not found".
-      const skips: { host: string; reason: SkipReason; raw: string }[] = [];
-      // Every selected+created host: take the key from its IdentityFile, or — if
-      // it has none — from the standard default ~/.ssh keys, exactly as ssh does.
-      const targets = rows.filter((h) => selectedSet.has(h.host) && createdSet.has(h.host));
-      if (targets.length) {
-        const { readTextFile } = await import("@tauri-apps/plugin-fs");
-        const { homeDir, join } = await import("@tauri-apps/api/path");
-        let home = "";
-        try {
-          home = await homeDir();
-        } catch {
-          home = "";
-        }
-
-        // Dedupe by public key so the same key isn't imported twice (re-importing
-        // the config, or a key already added by hand). Map existing key items →
-        // their public-key identity.
-        const items = await api.listItems(vaultId).catch(() => []);
-        const used = new Set(items.map((i) => i.itemId));
-        const idByPub = new Map<string, string>(); // normalized pub → item id
-        for (const it of items) {
-          if (it.itemType !== ItemType.SshKey) continue;
+        // 2) Import each selected host's IdentityFile key into the vault and link
+        //    it to the host. Best-effort: encrypted (passphrase) or missing keys
+        //    are skipped and the host still imports (auth falls back to a password
+        //    prompt). Desktop only — mobile has no access to ~/.ssh.
+        let keysImported = 0;
+        // Per-host skip reasons, surfaced precisely (and logged) so any future
+        // snag is visible instead of a vague "encrypted or not found".
+        const skips: { host: string; reason: SkipReason; raw: string }[] = [];
+        // Every selected+created host: take the key from its IdentityFile, or — if
+        // it has none — from the standard default ~/.ssh keys, exactly as ssh does.
+        const targets = rows.filter((h) => selectedSet.has(h.host) && createdSet.has(h.host));
+        if (targets.length) {
+          const { readTextFile } = await import("@tauri-apps/plugin-fs");
+          const { homeDir, join } = await import("@tauri-apps/api/path");
+          let home = "";
           try {
-            const pk = await api.getPublicKey(vaultId, it.itemId);
-            idByPub.set(normPub(pk.openssh), it.itemId);
+            home = await homeDir();
           } catch {
-            /* ignore unreadable item */
+            home = "";
           }
-        }
 
-        const pathToItem = new Map<string, string>(); // resolved path → key item id
-        for (const h of targets) {
-          // Candidate key paths: the explicit IdentityFile, else the default keys.
-          const candidates = h.identityFile
-            ? [await resolveKeyPath(h.identityFile, home, join)]
-            : await defaultIdentityPaths(home, join);
-
-          // First cached / readable private key wins.
-          let keyItemId: string | undefined;
-          let keyText: string | undefined;
-          let keyPath: string | undefined;
-          let readErr: unknown;
-          for (const cp of candidates) {
-            const cached = pathToItem.get(cp);
-            if (cached) {
-              keyItemId = cached;
-              break;
-            }
+          // Dedupe by public key so the same key isn't imported twice (re-importing
+          // the config, or a key already added by hand). Map existing key items →
+          // their public-key identity.
+          const items = await api.listItems(vaultId).catch(() => []);
+          const used = new Set(items.map((i) => i.itemId));
+          const idByPub = new Map<string, string>(); // normalized pub → item id
+          for (const it of items) {
+            if (it.itemType !== ItemType.SshKey) continue;
             try {
-              keyText = await readTextFile(cp);
-              keyPath = cp;
-              break;
-            } catch (e) {
-              readErr = e; // keep the last reason (e.g. permission/not-found)
+              const pk = await api.getPublicKey(vaultId, it.itemId);
+              idByPub.set(normPub(pk.openssh), it.itemId);
+            } catch {
+              /* ignore unreadable item */
             }
           }
 
-          if (!keyItemId) {
-            if (!keyText || !keyPath) {
-              // No key file readable. Only an explicit-but-missing IdentityFile is
-              // a real skip; a host that simply has no default key is fine.
-              if (h.identityFile) {
-                const raw = apiErrorMessage(readErr);
+          const pathToItem = new Map<string, string>(); // resolved path → key item id
+          for (const h of targets) {
+            // Candidate key paths: the explicit IdentityFile, else the default keys.
+            const candidates = h.identityFile
+              ? [await resolveKeyPath(h.identityFile, home, join)]
+              : await defaultIdentityPaths(home, join);
+
+            // First cached / readable private key wins.
+            let keyItemId: string | undefined;
+            let keyText: string | undefined;
+            let keyPath: string | undefined;
+            let readErr: unknown;
+            for (const cp of candidates) {
+              const cached = pathToItem.get(cp);
+              if (cached) {
+                keyItemId = cached;
+                break;
+              }
+              try {
+                keyText = await readTextFile(cp);
+                keyPath = cp;
+                break;
+              } catch (e) {
+                readErr = e; // keep the last reason (e.g. permission/not-found)
+              }
+            }
+
+            if (!keyItemId) {
+              if (!keyText || !keyPath) {
+                // No key file readable. Only an explicit-but-missing IdentityFile is
+                // a real skip; a host that simply has no default key is fine.
+                if (h.identityFile) {
+                  const raw = apiErrorMessage(readErr);
+                  skips.push({ host: h.host, reason: classifySkip(raw), raw });
+                }
+                continue;
+              }
+              try {
+                const base = (keyPath.split(/[/\\]/).pop() || "key").replace(/\.[^.]+$/, "");
+                const candidate = uniqueItemId(base, used);
+                const pub = await api.importSshKey(vaultId, candidate, keyText.trim());
+                const np = normPub(pub);
+                const existing = idByPub.get(np);
+                if (existing && existing !== candidate) {
+                  // Same key already in the vault → drop the dup, reuse the existing.
+                  await api.deleteItem(vaultId, candidate).catch(() => {});
+                  keyItemId = existing;
+                } else {
+                  used.add(candidate);
+                  idByPub.set(np, candidate);
+                  keyItemId = candidate;
+                  keysImported++;
+                }
+                pathToItem.set(keyPath, keyItemId);
+              } catch (e) {
+                const raw = apiErrorMessage(e);
                 skips.push({ host: h.host, reason: classifySkip(raw), raw });
+                continue;
               }
-              continue;
             }
+
             try {
-              const base = (keyPath.split(/[/\\]/).pop() || "key").replace(/\.[^.]+$/, "");
-              const candidate = uniqueItemId(base, used);
-              const pub = await api.importSshKey(vaultId, candidate, keyText.trim());
-              const np = normPub(pub);
-              const existing = idByPub.get(np);
-              if (existing && existing !== candidate) {
-                // Same key already in the vault → drop the dup, reuse the existing.
-                await api.deleteItem(vaultId, candidate).catch(() => {});
-                keyItemId = existing;
-              } else {
-                used.add(candidate);
-                idByPub.set(np, candidate);
-                keyItemId = candidate;
-                keysImported++;
-              }
-              pathToItem.set(keyPath, keyItemId);
-            } catch (e) {
-              const raw = apiErrorMessage(e);
-              skips.push({ host: h.host, reason: classifySkip(raw), raw });
-              continue;
+              const prof = await api.getConnection(vaultId, h.host);
+              await api.saveConnection(vaultId, { ...prof, auth: { type: "key", keyItemId } });
+            } catch {
+              /* leave the host with its default (password-prompt) auth */
             }
           }
-
-          try {
-            const prof = await api.getConnection(vaultId, h.host);
-            await api.saveConnection(vaultId, { ...prof, auth: { type: "key", keyItemId } });
-          } catch {
-            /* leave the host with its default (password-prompt) auth */
-          }
         }
-      }
 
-      await useApp.getState().reloadVault();
-      setImporting(false);
-      const hosts = t("count.hosts", { count: created.length });
-      toast(
-        keysImported > 0
-          ? t("import.importedWithKeys", { hosts, keys: t("count.keys", { count: keysImported }) })
-          : t("import.imported", { hosts }),
-        "ok",
-      );
-      if (skips.length > 0) {
-        for (const s of skips) {
-          // eslint-disable-next-line no-console
-          console.warn(`[ssh-config import] ${s.host}: key skipped (${s.reason}) — ${s.raw}`);
-        }
-        const order: SkipReason[] = [
-          "forbidden",
-          "encrypted",
-          "notFound",
-          "unsupported",
-          "parse",
-          "other",
-        ];
-        const counts = new Map<SkipReason, number>();
-        for (const s of skips) counts.set(s.reason, (counts.get(s.reason) ?? 0) + 1);
-        const breakdown = order
-          .filter((r) => counts.has(r))
-          .map((r) => `${counts.get(r)} ${t(`import.skipReason.${r}`)}`)
-          .join(", ");
+        await useApp.getState().reloadVault();
+        setImporting(false);
+        const hosts = t("count.hosts", { count: created.length });
         toast(
-          `${t("import.keysSkipped", { keys: t("count.keys", { count: skips.length }) })} — ${breakdown}`,
-          "warn",
+          keysImported > 0
+            ? t("import.importedWithKeys", { hosts, keys: t("count.keys", { count: keysImported }) })
+            : t("import.imported", { hosts }),
+          "ok",
         );
-      }
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+        if (skips.length > 0) {
+          for (const s of skips) {
+            // eslint-disable-next-line no-console
+            console.warn(`[ssh-config import] ${s.host}: key skipped (${s.reason}) — ${s.raw}`);
+          }
+          const order: SkipReason[] = [
+            "forbidden",
+            "encrypted",
+            "notFound",
+            "unsupported",
+            "parse",
+            "other",
+          ];
+          const counts = new Map<SkipReason, number>();
+          for (const s of skips) counts.set(s.reason, (counts.get(s.reason) ?? 0) + 1);
+          const breakdown = order
+            .filter((r) => counts.has(r))
+            .map((r) => `${counts.get(r)} ${t(`import.skipReason.${r}`)}`)
+            .join(", ");
+          toast(
+            `${t("import.keysSkipped", { keys: t("count.keys", { count: skips.length }) })} — ${breakdown}`,
+            "warn",
+          );
+        }
+      });
     } finally {
       setBusy(false);
     }

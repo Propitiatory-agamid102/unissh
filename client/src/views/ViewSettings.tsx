@@ -13,6 +13,7 @@ import type { IconName } from "@/components/primitives";
 import { useApp } from "@/store/app";
 import { useCtx } from "@/store/ctx";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import * as api from "@/bridge/api";
 import {
   apiErrorMessage,
@@ -507,14 +508,12 @@ function SettingsGeneral() {
   const { t } = useTranslation();
 
   const openLogs = async () => {
-    try {
+    await guard(async () => {
       await api.revealLogDir();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
   const copyDiagnostics = async () => {
-    try {
+    await guard(async () => {
       const [dir, appVer] = await Promise.all([
         api.logDir().catch(() => "?"),
         getVersion().catch(() => "?"),
@@ -529,9 +528,7 @@ function SettingsGeneral() {
       }
       await writeText(`UniSSH ${appVer}\nOS: ${plat} ${osv}\nLogs: ${dir}`);
       toast(t("settings.diagnosticsCopied"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   return (
@@ -684,13 +681,11 @@ function SettingsSecurity() {
   };
 
   const checkDbConsistency = async () => {
-    try {
+    await guard(async () => {
       const r = await api.checkConsistency();
       if (r.ok) toast(t("settings.dbConsistencyOk"), "ok");
       else toast(t("settings.dbConsistencyFailed", { count: r.issues.length }), "err");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const clearKnownHosts = () => {
@@ -701,16 +696,14 @@ function SettingsSecurity() {
       confirmLabel: t("settings.clear"),
       icon: "trash",
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           const hosts = useApp.getState().knownHosts;
           for (const h of hosts) {
             await api.forgetHost(h.host, h.port);
           }
           await useApp.getState().reloadVault();
           toast(t("settings.knownHostsCleared"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
@@ -817,12 +810,10 @@ function LinkRow({ label, url }: { label: string; url: string }) {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
   const copy = async () => {
-    try {
+    await guard(async () => {
       await writeText(url);
       toast(t("settings.linkCopied"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
   return (
     <div
@@ -1001,25 +992,21 @@ function SettingsVaults() {
       danger: true,
       confirmLabel: t("vault.deleteConfirm"),
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.deleteVault(v.vaultId);
           await useApp.getState().reloadVaults();
           toast(t("vault.removed"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
 
   const verify = async (v: VaultInfo) => {
-    try {
+    await guard(async () => {
       const r = await api.verifyVaultIntegrity(v.vaultId);
       if (r.ok) toast(t("vault.integrityOk", { count: r.checked }), "ok");
       else toast(t("vault.integrityFailed", { count: r.issues.length }), "err");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const purge = (v: VaultInfo) => {
@@ -1034,13 +1021,11 @@ function SettingsVaults() {
       confirmLabel: t("vault.purgeConfirm"),
       icon: "trash",
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.purgeVault(v.vaultId);
           await useApp.getState().reloadVaults();
           toast(t("vault.purged"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
@@ -1222,7 +1207,7 @@ function CloudConnectForm({ onConnected }: { onConnected: (s: ServerStatus) => v
       toast(t("serverCloud.fillInvite"), "warn");
       return;
     }
-    try {
+    await guard(async () => {
       const pv = await api.serverInviteRedeemPreview(
         baseUrl.trim(),
         tenantId.trim(),
@@ -1234,9 +1219,7 @@ function CloudConnectForm({ onConnected }: { onConnected: (s: ServerStatus) => v
           scope: pv.scope ?? t("serverCloud.previewScopeAll"),
         }),
       );
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const submit = async () => {
@@ -1500,13 +1483,11 @@ function CloudDevicesList({ currentDeviceId }: { currentDeviceId: string | null 
       danger: true,
       confirmLabel: t("serverCloud.revokeDevice"),
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.serverDeviceRevoke(d.deviceId);
           toast(t("serverCloud.revokeDeviceDone"), "ok");
           await load();
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
@@ -1638,14 +1619,12 @@ function PairingCard({ onClose }: { onClose: () => void }) {
     : "";
 
   const copy = async () => {
-    try {
+    await guard(async () => {
       // Pairing payload carries the OOB code (device-onboarding secret) →
       // auto-clear from the clipboard like other secrets.
       await writeSecretToClipboard(payloadText);
       toast(t("serverCloud.pairingCopied"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   return (
@@ -1931,12 +1910,10 @@ function CloudMembersPanel({ vault }: { vault: VaultInfo }) {
         : t("serverCloud.roleViewer");
 
   const load = async () => {
-    try {
+    await guard(async () => {
       const ms = await api.serverListMembers(vault.vaultId);
       setMembers(ms);
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
     // Account list is admin-only — tolerate a forbidden error silently.
     try {
       setAccounts(await api.serverListAccounts());
@@ -1959,14 +1936,14 @@ function CloudMembersPanel({ vault }: { vault: VaultInfo }) {
   const doAddMember = async () => {
     setBusy(true);
     try {
-      await api.serverAddMember(vault.vaultId, ed.trim(), x.trim(), role);
-      toast(t("serverCloud.memberAdded"), "ok");
-      setEd("");
-      setX("");
-      setAdding(false);
-      await load();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        await api.serverAddMember(vault.vaultId, ed.trim(), x.trim(), role);
+        toast(t("serverCloud.memberAdded"), "ok");
+        setEd("");
+        setX("");
+        setAdding(false);
+        await load();
+      });
     } finally {
       setBusy(false);
     }
@@ -2014,32 +1991,30 @@ function CloudMembersPanel({ vault }: { vault: VaultInfo }) {
       toast(t("serverCloud.pinNeedsAccount"), "warn");
       return;
     }
-    try {
+    await guard(async () => {
       await api.serverConfirmMemberPin(acc.accountId, ed25519PubHex);
       toast(t("serverCloud.pinConfirmed"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const rotateVk = async () => {
     if (busy) return;
     setBusy(true);
     try {
-      // Rebuild the remaining-member set from the current members + their keys.
-      const remaining = members
-        .map((m) => {
-          const acc = accounts.find((a) => a.ed25519PubHex === m.ed25519PubHex);
-          return acc?.x25519PubHex
-            ? { ed25519PubHex: m.ed25519PubHex, x25519PubHex: acc.x25519PubHex, role: m.role }
-            : null;
-        })
-        .filter((r): r is NonNullable<typeof r> => r !== null);
-      const epoch = await api.serverRotateVk(vault.vaultId, remaining);
-      toast(t("serverCloud.rotateVkConfirmed", { epoch }), "ok");
-      await load();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        // Rebuild the remaining-member set from the current members + their keys.
+        const remaining = members
+          .map((m) => {
+            const acc = accounts.find((a) => a.ed25519PubHex === m.ed25519PubHex);
+            return acc?.x25519PubHex
+              ? { ed25519PubHex: m.ed25519PubHex, x25519PubHex: acc.x25519PubHex, role: m.role }
+              : null;
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null);
+        const epoch = await api.serverRotateVk(vault.vaultId, remaining);
+        toast(t("serverCloud.rotateVkConfirmed", { epoch }), "ok");
+        await load();
+      });
     } finally {
       setBusy(false);
     }
@@ -2223,13 +2198,11 @@ function CloudServersList({
       danger: true,
       confirmLabel: t("serverCloud.removeServer"),
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.serverRemove(s.serverId!);
           await reloadServerStatus();
           toast(t("serverCloud.removeServerDone"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
@@ -2414,7 +2387,7 @@ function SettingsCloud() {
   };
 
   const doSync = async () => {
-    try {
+    await guard(async () => {
       await syncNow();
       const r = useApp.getState().syncStatus.lastReport;
       if (r) {
@@ -2428,15 +2401,13 @@ function SettingsCloud() {
           r.conflicts > 0 || r.rejected > 0 ? "warn" : "ok",
         );
       }
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   // Full re-pull of THIS server: reset the pull cursor + sync, so a vault that was
   // rejected under a prior identity (its seqs already past the cursor) is recovered.
   const doRepull = async () => {
-    try {
+    await guard(async () => {
       await repull(s.serverId ?? undefined);
       const r = useApp.getState().syncStatus.lastReport;
       if (r) {
@@ -2449,16 +2420,14 @@ function SettingsCloud() {
           r.conflicts > 0 || r.rejected > 0 ? "warn" : "ok",
         );
       }
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   // Recovery: bring back cloud vaults deleted locally but still live on the server.
   // A local delete tombstones the vault above the server's version, so LWW won't let
   // a pull resurrect it and the list hides it. Purge the local tombstone + re-pull.
   const doRestoreDeleted = async () => {
-    try {
+    await guard(async () => {
       const n = await api.serverRestoreDeletedVaults(s.serverId ?? undefined);
       await useApp.getState().reloadVaults();
       await reloadServerStatus();
@@ -2466,41 +2435,33 @@ function SettingsCloud() {
         n > 0 ? t("serverCloud.restoreDone", { count: n }) : t("serverCloud.restoreNone"),
         n > 0 ? "ok" : "warn",
       );
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const doRefresh = async () => {
-    try {
+    await guard(async () => {
       await api.serverRefreshSession(s.serverId ?? undefined);
       await reloadServerStatus();
       toast(t("serverCloud.sessionRefreshed"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
   // Full re-auth via the local keyset (server_login) — for a fully dropped
   // connection where the refresh token is dead, so "Refresh session" can't help.
   // Works because the account identity is the keyset, not the session tokens.
   const doSignIn = async () => {
-    try {
+    await guard(async () => {
       await api.serverLogin(s.serverId ?? undefined);
       await reloadServerStatus();
       toast(t("serverCloud.signedIn"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const doSignOut = async () => {
-    try {
+    await guard(async () => {
       await api.serverLogout(s.serverId ?? undefined);
       await reloadServerStatus();
       toast(t("serverCloud.signedOut"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const lastSyncStr = syncStatus.lastSyncAt

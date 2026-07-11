@@ -15,6 +15,7 @@ import { Btn, Icon, NO_AUTOCORRECT, StatusDot } from "@/components/primitives";
 import { useApp, type PendingMismatch } from "@/store/app";
 import { useIsMobile } from "@/store/responsive";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import * as api from "@/bridge/api";
 import {
   apiErrorMessage,
@@ -293,59 +294,59 @@ export function ViewBroadcast() {
     }
     const targets: MultiExecTarget[] = resolvedHosts.map((r) => r.target);
     try {
-      const onEvent = (e: BroadcastEvent) => {
-        if (e.type === "data") {
-          const text = new TextDecoder().decode(new Uint8Array(e.bytes));
-          setOutputs((prev) => ({ ...prev, [e.index]: (prev[e.index] ?? "") + text }));
-        } else {
-          setOpened((prev) =>
-            prev.map((h) =>
-              h.index === e.index
-                ? { ...h, status: { ...h.status, connected: false, error: t("broadcast.closedCode", { code: e.exit }) } }
-                : h,
-            ),
-          );
+      await guard(async () => {
+        const onEvent = (e: BroadcastEvent) => {
+          if (e.type === "data") {
+            const text = new TextDecoder().decode(new Uint8Array(e.bytes));
+            setOutputs((prev) => ({ ...prev, [e.index]: (prev[e.index] ?? "") + text }));
+          } else {
+            setOpened((prev) =>
+              prev.map((h) =>
+                h.index === e.index
+                  ? { ...h, status: { ...h.status, connected: false, error: t("broadcast.closedCode", { code: e.exit }) } }
+                  : h,
+              ),
+            );
+          }
+        };
+        const res = await api.broadcastOpen(targets, TERM, COLS, ROWS, onEvent);
+        // If the vault switched while we were opening, this broadcast belongs to the
+        // previous vault's hosts — close it instead of registering it under the new
+        // one (the vault-change effect already reset our local state).
+        if (useApp.getState().vaultId !== vaultId) {
+          void api.broadcastClose(res.id);
+          return;
         }
-      };
-      const res = await api.broadcastOpen(targets, TERM, COLS, ROWS, onEvent);
-      // If the vault switched while we were opening, this broadcast belongs to the
-      // previous vault's hosts — close it instead of registering it under the new
-      // one (the vault-change effect already reset our local state).
-      if (useApp.getState().vaultId !== vaultId) {
-        void api.broadcastClose(res.id);
-        return;
-      }
-      const map = new Map(res.statuses.map((s) => [s.index, s]));
-      const list: OpenedHost[] = resolvedHosts.map((r, i) => ({
-        index: i,
-        profile: r.profile,
-        status: map.get(i) ?? {
-          host: r.profile.host,
+        const map = new Map(res.statuses.map((s) => [s.index, s]));
+        const list: OpenedHost[] = resolvedHosts.map((r, i) => ({
           index: i,
-          connected: false,
-          error: t("broadcast.noStatus"),
-        },
-      }));
-      // Unbound/redirected personal hosts: shown as disconnected (never opened).
-      failedHosts.forEach((f, j) => {
-        const idx = resolvedHosts.length + j;
-        list.push({
-          index: idx,
-          profile: f.profile,
-          status: { host: f.profile.host, index: idx, connected: false, error: f.error },
+          profile: r.profile,
+          status: map.get(i) ?? {
+            host: r.profile.host,
+            index: i,
+            connected: false,
+            error: t("broadcast.noStatus"),
+          },
+        }));
+        // Unbound/redirected personal hosts: shown as disconnected (never opened).
+        failedHosts.forEach((f, j) => {
+          const idx = resolvedHosts.length + j;
+          list.push({
+            index: idx,
+            profile: f.profile,
+            status: { host: f.profile.host, index: idx, connected: false, error: f.error },
+          });
         });
+        bcIdRef.current = res.id;
+        useApp.getState().addBroadcast(res.id);
+        setBcId(res.id);
+        setOpened(list);
+        const okN = list.filter((h) => h.status.connected).length;
+        toast(
+          t("broadcast.opened", { ok: okN, hosts: t("count.hosts", { count: list.length }) }),
+          okN > 0 ? "ok" : "warn",
+        );
       });
-      bcIdRef.current = res.id;
-      useApp.getState().addBroadcast(res.id);
-      setBcId(res.id);
-      setOpened(list);
-      const okN = list.filter((h) => h.status.connected).length;
-      toast(
-        t("broadcast.opened", { ok: okN, hosts: t("count.hosts", { count: list.length }) }),
-        okN > 0 ? "ok" : "warn",
-      );
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
     } finally {
       setBusy(false);
     }
@@ -355,12 +356,10 @@ export function ViewBroadcast() {
     const id = bcIdRef.current;
     if (!id || liveCount === 0 || typed.length === 0) return;
     const data = Array.from(new TextEncoder().encode(typed + "\n"));
-    try {
+    await guard(async () => {
       await api.broadcastWriteAll(id, data);
       setTyped("");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
     inputRef.current?.focus();
   };
 

@@ -11,6 +11,7 @@ import { Btn, Checkbox, Field, Icon, Input, Logo, NO_AUTOCORRECT, Spinner, Toggl
 import { useApp } from "@/store/app";
 import { useIsMobile } from "@/store/responsive";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import * as api from "@/bridge/api";
 import { readSecretKeyOnce, rememberSecretKey } from "@/bridge/secretKey";
 import { logWarn } from "@/bridge/log";
@@ -438,7 +439,7 @@ function EmergencyKit({ secretKey, onDone }: { secretKey: string | null; onDone:
   const download = async () => {
     if (!key) return;
     const body = t("onboarding.kitFileBody", { secretKey: key });
-    try {
+    await guard(async () => {
       const path = await save({
         defaultPath: "unissh-emergency-kit.txt",
         filters: [{ name: "Text", extensions: ["txt"] }],
@@ -447,9 +448,7 @@ function EmergencyKit({ secretKey, onDone }: { secretKey: string | null; onDone:
         await writeTextFile(path, body);
         toast(t("onboarding.toast.kitSaved"), "ok");
       }
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   return (
@@ -691,13 +690,11 @@ function Unlock() {
       icon: "trash",
       confirmLabel: t("entry.unlock.resetConfirm"),
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.resetInstance();
           await useApp.getState().boot(); // both files gone → lands on onboarding
           toast(t("entry.unlock.resetDone"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };

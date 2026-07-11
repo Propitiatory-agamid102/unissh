@@ -8,8 +8,8 @@ import { MONO, rgba } from "@/theme/tokens";
 import { Btn, Icon } from "@/components/primitives";
 import { useApp, type PendingMismatch } from "@/store/app";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import * as api from "@/bridge/api";
-import { apiErrorMessage } from "@/bridge/types";
 import type { KnownHostInfo } from "@/bridge/types";
 import { useTranslation, Trans } from "@/i18n";
 import { useFmt } from "@/i18n/format";
@@ -34,7 +34,7 @@ export function ViewKnown() {
   const pendingMismatch = useApp((s) => s.pendingMismatch);
 
   const importKnown = async () => {
-    try {
+    await guard(async () => {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const { readTextFile } = await import("@tauri-apps/plugin-fs");
       const selected = await open({
@@ -47,9 +47,7 @@ export function ViewKnown() {
       const report = await api.importKnownHosts(text);
       await useApp.getState().reloadVault();
       toast(t("known.imported", { hosts: t("count.hosts", { count: report.imported }) }), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   // Unpinning a key silently would defeat the pin: gate it behind an explicit
@@ -63,13 +61,11 @@ export function ViewKnown() {
       confirmLabel: t("known.forget"),
       icon: "fingerprint",
       onConfirm: async () => {
-        try {
+        await guard(async () => {
           await api.forgetHost(k.host, k.port);
           await useApp.getState().reloadVault();
           toast(t("known.hostRemoved"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
   };
@@ -89,15 +85,13 @@ export function ViewKnown() {
   const accept = async () => {
     const m = useApp.getState().pendingMismatch;
     if (!m) return;
-    try {
+    await guard(async () => {
       await api.trustHost(m.host, m.port, m.fingerprint);
       useApp.getState().setPendingMismatch(null);
       clearMismatchPanes(m);
       await useApp.getState().reloadVault();
       toast(t("known.newKeyAccepted"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const reject = () => {

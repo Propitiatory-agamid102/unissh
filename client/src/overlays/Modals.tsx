@@ -33,6 +33,7 @@ import {
 import { useDialogFocus, useDialogKeys } from "@/components/a11y";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import { useApp } from "@/store/app";
 import { useCtx } from "@/store/ctx";
 import { useIsMobile } from "@/store/responsive";
@@ -2291,7 +2292,7 @@ function TermThemeModal({ edit, onClose }: { edit?: TermTheme; onClose: () => vo
   };
 
   const exportJson = async () => {
-    try {
+    await guard(async () => {
       const { save: saveDialog } = await import("@tauri-apps/plugin-dialog");
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
       const base = pal.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -2302,9 +2303,7 @@ function TermThemeModal({ edit, onClose }: { edit?: TermTheme; onClose: () => vo
       if (!path) return;
       await writeTextFile(path, JSON.stringify(pal, null, 2) + "\n");
       toast(t("termtheme.exported"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const doImport = async () => {
@@ -2806,28 +2805,28 @@ function BindHostModal({
     if (!bindVault || !selected) return;
     setBusy(true);
     try {
-      const dest = await api.personalDestination(
-        host.host,
-        host.port,
-        host.usernameTemplate,
-        host.jumps,
-      );
-      // Re-binding (an existing binding present) is an explicit user action here,
-      // so allow a changed destination pin; a first bind never needs the flag.
-      await api.setBinding(
-        bindVault,
-        {
-          teamVaultId: vaultId,
-          profileUid: host.uid,
-          identityItemId: selected,
-          destinationPin: dest,
-        },
-        binding !== null,
-      );
-      toast(t("bind.done"), "ok");
-      onClose();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        const dest = await api.personalDestination(
+          host.host,
+          host.port,
+          host.usernameTemplate,
+          host.jumps,
+        );
+        // Re-binding (an existing binding present) is an explicit user action here,
+        // so allow a changed destination pin; a first bind never needs the flag.
+        await api.setBinding(
+          bindVault,
+          {
+            teamVaultId: vaultId,
+            profileUid: host.uid,
+            identityItemId: selected,
+            destinationPin: dest,
+          },
+          binding !== null,
+        );
+        toast(t("bind.done"), "ok");
+        onClose();
+      });
     } finally {
       setBusy(false);
     }
@@ -2837,11 +2836,11 @@ function BindHostModal({
     if (!bindVault) return;
     setBusy(true);
     try {
-      await api.deleteBinding(bindVault, vaultId, host.uid);
-      toast(t("bind.removed"), "ok");
-      onClose();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        await api.deleteBinding(bindVault, vaultId, host.uid);
+        toast(t("bind.removed"), "ok");
+        onClose();
+      });
     } finally {
       setBusy(false);
     }

@@ -12,7 +12,7 @@ import { useApp } from "@/store/app";
 import { useIsMobile } from "@/store/responsive";
 import { useDialogFocus, useDialogKeys } from "@/components/a11y";
 import { toast } from "@/store/toast";
-import { apiErrorMessage } from "@/bridge/types";
+import { guard } from "@/store/action";
 import type { ServerGroup } from "@/bridge/types";
 import * as api from "@/bridge/api";
 import { useTranslation } from "@/i18n";
@@ -64,20 +64,18 @@ function GroupsModalBody() {
     if (!label || label === g.label) return;
     const vaultId = useApp.getState().vaultId;
     if (!vaultId) return;
-    try {
+    await guard(async () => {
       await api.saveGroup(vaultId, { ...g, label });
       await reload();
       toast(t("groups.renamed"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const addGroup = async () => {
     const vaultId = useApp.getState().vaultId;
     if (!vaultId) return;
     const groupId = `group-${Date.now()}`;
-    try {
+    await guard(async () => {
       await api.saveGroup(vaultId, {
         groupId,
         label: t("groups.newGroupName"),
@@ -87,9 +85,7 @@ function GroupsModalBody() {
       await reload();
       setEditing(groupId);
       setDraft(t("groups.newGroupName"));
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   const del = (g: ServerGroup) =>
@@ -105,13 +101,11 @@ function GroupsModalBody() {
       onConfirm: async () => {
         const vaultId = useApp.getState().vaultId;
         if (!vaultId) return;
-        try {
+        await guard(async () => {
           await api.deleteGroup(vaultId, g.groupId);
           await reload();
           toast(t("groups.deleted"), "ok");
-        } catch (e) {
-          toast(apiErrorMessage(e), "err");
-        }
+        });
       },
     });
 
@@ -128,11 +122,11 @@ function GroupsModalBody() {
       return;
     }
     try {
-      await api.saveGroup(vaultId, { ...g, memberIds: [...g.memberIds, selHost] });
-      await reload();
-      toast(t("groups.hostMoved"), "ok");
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        await api.saveGroup(vaultId, { ...g, memberIds: [...g.memberIds, selHost] });
+        await reload();
+        toast(t("groups.hostMoved"), "ok");
+      });
     } finally {
       setSelHost(null);
     }

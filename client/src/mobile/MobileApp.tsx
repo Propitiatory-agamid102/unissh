@@ -12,8 +12,8 @@ import { useApp, HOST_FILTER_ALL } from "@/store/app";
 import { useKeyboardInset, useLandscape } from "@/store/responsive";
 import { useTranslation, tDyn } from "@/i18n";
 import { useCtx } from "@/store/ctx";
-import { toast } from "@/store/toast";
-import { profileAuthKind, apiErrorMessage } from "@/bridge/types";
+import { guard } from "@/store/action";
+import { profileAuthKind } from "@/bridge/types";
 import type { ConnectionProfile, ServerGroup, VaultInfo } from "@/bridge/types";
 import * as api from "@/bridge/api";
 
@@ -1033,11 +1033,9 @@ function MTerminal({ onNeedHosts }: { onNeedHosts: () => void }) {
   const sendKey = async (bytes: number[]) => {
     const sid = activePane?.sessionId;
     if (!sid) return;
-    try {
+    await guard(async () => {
       await api.sessionWrite(sid, bytes);
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
-    }
+    });
   };
 
   // A phone session dies on every backgrounding / Wi-Fi handoff, so make recovery

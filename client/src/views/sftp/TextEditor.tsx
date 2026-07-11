@@ -10,6 +10,7 @@ import { Icon, Btn, Spinner } from "@/components/primitives";
 import { useKeyboardInset } from "@/store/responsive";
 import { useTranslation } from "@/i18n";
 import { toast } from "@/store/toast";
+import { guard } from "@/store/action";
 import { apiErrorMessage } from "@/bridge/types";
 import type { FileSource } from "@/bridge/sources";
 
@@ -81,12 +82,12 @@ export function TextEditor({
   const save = async () => {
     setSaving(true);
     try {
-      await source.writeText(path, text);
-      setOriginal(text);
-      toast(t("sftp.editor.saved"), "ok");
-      onSaved?.();
-    } catch (e) {
-      toast(apiErrorMessage(e), "err");
+      await guard(async () => {
+        await source.writeText(path, text);
+        setOriginal(text);
+        toast(t("sftp.editor.saved"), "ok");
+        onSaved?.();
+      });
     } finally {
       setSaving(false);
     }
