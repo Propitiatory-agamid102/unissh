@@ -5,9 +5,10 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { usePalette } from "@/theme/ThemeProvider";
-import { Icon, AuthBadge, NO_AUTOCORRECT, Tag, Spinner, type IconName } from "@/components/primitives";
+import { Icon, AuthBadge, NO_AUTOCORRECT, Tag, Spinner, StatusDot, type IconName } from "@/components/primitives";
+import { FlatAvatar, MetaChip } from "@/components/mono";
 import { BottomSheet } from "@/components/Modal";
-import { MONO, UI, vaultColor } from "@/theme/tokens";
+import { MONO, UI } from "@/theme/tokens";
 import { useApp, HOST_FILTER_ALL } from "@/store/app";
 import { useKeyboardInset, useLandscape } from "@/store/responsive";
 import { useTranslation, tDyn } from "@/i18n";
@@ -69,7 +70,6 @@ function MTopBar({
   const p = usePalette();
   const { t } = useTranslation();
   const name = vault?.name ?? t("mobile.vault");
-  const color = vaultColor(p, vault?.vaultId ?? null);
   return (
     <div style={{ flexShrink: 0, padding: "4px 16px 12px", display: "flex", alignItems: "center", gap: 10 }}>
       <button
@@ -86,23 +86,7 @@ function MTopBar({
           cursor: "pointer",
         }}
       >
-        <span
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: 8,
-            background: `linear-gradient(140deg, ${color}, ${p.purple})`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#fff",
-            fontWeight: 700,
-            fontSize: 13,
-            flexShrink: 0,
-          }}
-        >
-          {name[0]}
-        </span>
+        <FlatAvatar name={name} size={26} shape="square" />
         <span style={{ fontSize: 15, fontWeight: 700, color: p.txt, lineHeight: 1 }}>{name}</span>
         <Icon name="cd" size={15} color={p.txt3} />
       </button>
@@ -180,27 +164,26 @@ function MHostCard({
               position: "absolute",
               bottom: -2,
               right: -2,
-              width: 13,
-              height: 13,
+              background: p.bg1,
               borderRadius: "50%",
-              background: p.green,
-              border: `2.5px solid ${p.bg1}`,
-              boxShadow: `0 0 6px ${p.green}`,
-              animation: "uhPulse 1.6s ease-in-out infinite",
+              padding: 2,
+              display: "flex",
             }}
-          />
+          >
+            <StatusDot status="online" size={9} srLabel={t("mobile.session")} />
+          </span>
         )}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 16, fontWeight: 700, color: p.txt }}>{h.label}</span>
-          {jump && <Icon name="branch" size={13} color={p.purple} stroke={1.8} />}
+          {jump && <Icon name="branch" size={13} color={p.txt3} stroke={1.8} />}
         </div>
         <div
           style={{
             fontFamily: MONO,
             fontSize: 12,
-            color: p.txt3,
+            color: p.txt2,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -209,46 +192,23 @@ function MHostCard({
           {h.user}@{h.host}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 6 }}>
-          {active ? (
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                fontFamily: MONO,
-                fontSize: 11.5,
-                color: p.green,
-                whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: p.green, boxShadow: `0 0 6px ${p.green}` }} />
-              {t("mobile.session")}
-            </span>
-          ) : (
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                fontFamily: MONO,
-                fontSize: 11.5,
-                color: p.txt3,
-                whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >
-              <Icon name="clock" size={11} color={p.txt3} />
-              {`:${h.port}`}
-            </span>
-          )}
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: 11.5,
+              color: p.txt3,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >
+            {`:${h.port}`}
+          </span>
           <AuthBadge auth={authKind} jump={false} />
           <div style={{ flex: 1 }} />
-          {h.tags.slice(0, 1).map((t) => (
-            <Tag key={t} mono>
-              #{t}
-            </Tag>
-          ))}
+          {h.tags.length > 0 && (
+            <Tag mono>#{h.tags[0]}</Tag>
+          )}
+          {h.tags.length > 1 && <Tag>+{h.tags.length - 1}</Tag>}
         </div>
       </div>
       <Icon name="cd" size={17} color={p.txt3} />
@@ -273,7 +233,6 @@ function MVaultSheet({ onClose }: { onClose: () => void }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {vaults.map((x) => {
           const on = x.vaultId === vaultId;
-          const color = vaultColor(p, x.vaultId);
           return (
             <button
               key={x.vaultId}
@@ -292,22 +251,7 @@ function MVaultSheet({ onClose }: { onClose: () => void }) {
                 cursor: "pointer",
               }}
             >
-              <span
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 10,
-                  background: `linear-gradient(140deg, ${color}, ${p.purple})`,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "#fff",
-                  fontWeight: 700,
-                  fontSize: 15,
-                }}
-              >
-                {x.name[0]}
-              </span>
+              <FlatAvatar name={x.name} size={36} shape="square" />
               <div style={{ flex: 1, textAlign: "left" }}>
                 <div style={{ fontSize: 16, fontWeight: 700, color: p.txt }}>{x.name}</div>
                 <div style={{ fontSize: 12.5, color: p.txt3 }}>{on ? t("count.hosts", { count: hosts.length }) : t("mobile.vaultLower")}</div>
@@ -515,7 +459,7 @@ function MHosts({
           {query && (
             <button
               onClick={() => setQuery("")}
-              aria-label="Clear"
+              aria-label={t("common.clear")}
               style={{
                 width: 28,
                 height: 28,
@@ -567,9 +511,9 @@ function MHosts({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            width: 38,
-            height: 38,
-            borderRadius: 20,
+            width: 44,
+            height: 44,
+            borderRadius: 22,
             cursor: "pointer",
             border: `1px solid ${p.line}`,
             background: p.bg2,
@@ -589,18 +533,19 @@ function MHosts({
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
+                minHeight: 44,
                 fontFamily: UI,
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: on ? 700 : 600,
                 cursor: "pointer",
-                padding: "8px 13px",
-                borderRadius: 20,
-                border: `1px solid ${on ? p.accentLine : p.line}`,
-                background: on ? p.accentSoft : "transparent",
-                color: on ? p.accent : p.txt2,
+                padding: "8px 14px",
+                borderRadius: 22,
+                border: `1px solid ${on ? p.line2 : p.line}`,
+                background: on ? p.bg3 : "transparent",
+                color: on ? p.txt : p.txt2,
               }}
             >
-              <Icon name="folder" size={13} color={on ? p.accent : p.txt3} />
+              <Icon name="folder" size={13} color={on ? p.txt2 : p.txt3} />
               {g.label}
             </button>
           );
@@ -617,15 +562,18 @@ function MHosts({
               onClick={() => setHostFilter(tag)}
               style={{
                 flexShrink: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                minHeight: 44,
                 fontFamily: isAll ? UI : MONO,
                 fontSize: 13,
-                fontWeight: 600,
+                fontWeight: on ? 700 : 600,
                 cursor: "pointer",
                 padding: "8px 14px",
-                borderRadius: 20,
-                border: `1px solid ${on ? p.accentLine : p.line}`,
-                background: on ? p.accentSoft : "transparent",
-                color: on ? p.accent : p.txt2,
+                borderRadius: 22,
+                border: `1px solid ${on ? p.line2 : p.line}`,
+                background: on ? p.bg3 : "transparent",
+                color: on ? p.txt : p.txt2,
               }}
             >
               {isAll ? t("common.all") : "#" + tag}
@@ -637,15 +585,18 @@ function MHosts({
             onClick={() => setHostFilter("__untagged")}
             style={{
               flexShrink: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              minHeight: 44,
               fontFamily: UI,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: hostFilter === "__untagged" ? 700 : 600,
               cursor: "pointer",
               padding: "8px 14px",
-              borderRadius: 20,
-              border: `1px solid ${hostFilter === "__untagged" ? p.accentLine : p.line}`,
-              background: hostFilter === "__untagged" ? p.accentSoft : "transparent",
-              color: hostFilter === "__untagged" ? p.accent : p.txt3,
+              borderRadius: 22,
+              border: `1px solid ${hostFilter === "__untagged" ? p.line2 : p.line}`,
+              background: hostFilter === "__untagged" ? p.bg3 : "transparent",
+              color: hostFilter === "__untagged" ? p.txt : p.txt2,
             }}
           >
             {t("mobile.untagged")}
@@ -721,14 +672,14 @@ function MHosts({
           width: 56,
           height: 56,
           borderRadius: 18,
-          background: `linear-gradient(140deg, ${p.accent}, ${p.accent2})`,
+          background: p.accent,
           border: "none",
-          color: "#fff",
+          color: p.accentInk ?? "#fff",
           cursor: "pointer",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          boxShadow: `0 10px 26px -8px ${p.accent}`,
+          boxShadow: "0 8px 22px -12px rgba(0,0,0,0.6)",
           zIndex: 5,
         }}
       >
@@ -795,6 +746,17 @@ function MHostDetail({
   const ctx = useCtx();
   const authKind = profileAuthKind(profile.auth);
   const jump = profile.jumps[0];
+  // Real known-host state for this host — quiet "Key verified" + short fingerprint
+  // when a key is pinned, honest "not yet connected (TOFU)" otherwise. No fabrication.
+  const knownHosts = useApp((s) => s.knownHosts);
+  const known = knownHosts.find((k) => k.host === profile.host && k.port === profile.port);
+  const knownFp = useMemo(() => {
+    if (!known) return "";
+    const parts = known.key.trim().split(/\s+/);
+    const algo = parts[0] ?? "";
+    const blob = parts.slice(1).join("");
+    return blob ? `${algo} …${blob.slice(-16)}` : algo;
+  }, [known]);
 
   const Row = ({ label, mono, children }: { label: string; mono?: boolean; children: React.ReactNode }) => (
     <div style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "13px 0", borderBottom: `1px solid ${p.line}` }}>
@@ -890,15 +852,14 @@ function MHostDetail({
                   position: "absolute",
                   bottom: 0,
                   right: 0,
-                  width: 18,
-                  height: 18,
+                  background: p.bg0,
                   borderRadius: "50%",
-                  background: p.green,
-                  border: `3px solid ${p.bg0}`,
-                  boxShadow: `0 0 8px ${p.green}`,
-                  animation: "uhPulse 1.6s ease-in-out infinite",
+                  padding: 3,
+                  display: "flex",
                 }}
-              />
+              >
+                <StatusDot status="online" size={12} srLabel={t("mobile.sessionNow")} />
+              </span>
             )}
           </span>
           <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: -0.5, color: p.txt, textAlign: "center", wordBreak: "break-word" }}>{profile.label}</div>
@@ -914,9 +875,9 @@ function MHostDetail({
               flex: 1,
               height: 50,
               borderRadius: 14,
-              background: `linear-gradient(140deg, ${p.accent}, ${p.accent2})`,
+              background: p.accent,
               border: "none",
-              color: "#fff",
+              color: p.accentInk ?? "#fff",
               cursor: "pointer",
               fontSize: 16,
               fontWeight: 700,
@@ -924,7 +885,6 @@ function MHostDetail({
               alignItems: "center",
               justifyContent: "center",
               gap: 8,
-              boxShadow: `0 8px 20px -8px ${p.accent}`,
             }}
           >
             <Icon name="terminal" size={19} />
@@ -960,20 +920,17 @@ function MHostDetail({
           <Row label={t("mobile.detail.user")} mono>
             {profile.user}
           </Row>
-          <Row label="Auth">
+          <Row label={t("mobile.detail.auth")}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
               {authLabel}
               <AuthBadge auth={authKind} />
             </span>
           </Row>
           {jump && (
-            <Row label="ProxyJump" mono>
+            <Row label={t("mobile.detail.proxyJump")} mono>
               {jump.user}@{jump.host}
             </Row>
           )}
-          <Row label={t("mobile.detail.session")}>
-            {active ? <span style={{ color: p.green }}>{t("mobile.sessionNow")}</span> : <span style={{ color: p.txt3 }}>{t("mobile.sessionNone")}</span>}
-          </Row>
           {profile.tags.length > 0 && (
             <Row label={t("mobile.detail.tags")} mono>
               {profile.tags.map((t) => `#${t}`).join(" ")}
@@ -982,10 +939,32 @@ function MHostDetail({
         </div>
 
         <div style={{ marginTop: 14, padding: 14, borderRadius: 14, background: p.bg1, border: `1px solid ${p.line}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: p.txt3 }}>
-            <Icon name="shieldcheck" size={14} color={p.green} />
-            {t("mobile.tofuNote")}
-          </div>
+          {known ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+              <MetaChip icon="shieldcheck" tone="good">
+                {t("mobile.keyVerified")}
+              </MetaChip>
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontFamily: MONO,
+                  fontSize: 12,
+                  color: p.txt3,
+                  textAlign: "right",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {knownFp}
+              </span>
+            </div>
+          ) : (
+            <MetaChip icon="shield" tone="neutral">
+              {t("mobile.notConnectedTofu")}
+            </MetaChip>
+          )}
         </div>
       </div>
     </>
@@ -1072,9 +1051,9 @@ function MTerminal({ onNeedHosts }: { onNeedHosts: () => void }) {
             height: 46,
             padding: "0 20px",
             borderRadius: 14,
-            background: `linear-gradient(140deg, ${p.accent}, ${p.accent2})`,
+            background: p.accent,
             border: "none",
-            color: "#fff",
+            color: p.accentInk ?? "#fff",
             fontSize: 15,
             fontWeight: 700,
             cursor: "pointer",
