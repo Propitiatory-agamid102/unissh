@@ -10,7 +10,7 @@ import { useTranslation } from "@/i18n";
 import { usePalette } from "@/theme/ThemeProvider";
 import { MONO, UI } from "@/theme/tokens";
 import { Btn, Icon, NO_AUTOCORRECT, VaultBadge } from "@/components/primitives";
-import { UnderlineTabs, fmtRelative, FlatAvatar, MetaChip } from "@/components/mono";
+import { UnderlineTabs, fmtRelative, FlatAvatar, MetaChip, RowOverflowMenu } from "@/components/mono";
 import { useApp } from "@/store/app";
 import { useCtx } from "@/store/ctx";
 import { useIsMobile } from "@/store/responsive";
@@ -411,52 +411,21 @@ function KeyRow({ item, isMobile }: { item: ItemInfo; isMobile: boolean }) {
         >
           <Icon name={copied ? "check" : "copy"} size={14} />
         </button>
-        <button
-          onClick={() =>
-            openssh && ctx.openModal({ kind: "copyKeyToServer", openssh, keyItemId: item.itemId })
-          }
-          title={t("secrets.copyToServer")}
-          aria-label={t("secrets.copyToServer")}
-          disabled={!openssh}
-          style={{
-            ...actBtn,
-            border: `1px solid ${p.line}`,
-            background: p.bg2,
-            color: p.txt3,
-            cursor: openssh ? "pointer" : "default",
-            opacity: openssh ? 1 : 0.5,
-          }}
-        >
-          <Icon name="upload" size={14} />
-        </button>
-        <button
-          onClick={onRotate}
-          title={t("secrets.rotateKey")}
-          aria-label={t("secrets.rotateKey")}
-          style={{
-            ...actBtn,
-            border: `1px solid ${p.line}`,
-            background: p.bg2,
-            color: p.txt3,
-            cursor: "pointer",
-          }}
-        >
-          <Icon name="refresh" size={14} />
-        </button>
-        <button
-          onClick={onExport}
-          title={t("secrets.exportPrivateKey")}
-          aria-label={t("secrets.exportPrivateKey")}
-          style={{
-            ...actBtn,
-            border: `1px solid ${p.line}`,
-            background: p.bg2,
-            color: p.txt3,
-            cursor: "pointer",
-          }}
-        >
-          <Icon name="download" size={14} />
-        </button>
+        <RowOverflowMenu
+          ariaLabel={t("secrets.keyActions")}
+          items={[
+            {
+              label: t("secrets.copyToServer"),
+              icon: "upload",
+              onClick: () => {
+                if (openssh)
+                  ctx.openModal({ kind: "copyKeyToServer", openssh, keyItemId: item.itemId });
+              },
+            },
+            { label: t("secrets.rotateKey"), icon: "refresh", onClick: onRotate },
+            { label: t("secrets.exportPrivateKey"), icon: "download", onClick: onExport },
+          ]}
+        />
         <button
           onClick={onDelete}
           title={t("common.delete")}
