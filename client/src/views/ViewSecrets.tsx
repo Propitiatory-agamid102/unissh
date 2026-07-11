@@ -10,6 +10,7 @@ import { useTranslation } from "@/i18n";
 import { usePalette } from "@/theme/ThemeProvider";
 import { MONO, UI, rgba, vaultColor } from "@/theme/tokens";
 import { Btn, Icon, NO_AUTOCORRECT, VaultBadge } from "@/components/primitives";
+import { UnderlineTabs } from "@/components/mono";
 import { useApp } from "@/store/app";
 import { useCtx } from "@/store/ctx";
 import { useIsMobile } from "@/store/responsive";
@@ -66,7 +67,6 @@ function TabBar({
   counts: Record<SecretTab, number>;
   isMobile: boolean;
 }) {
-  const p = usePalette();
   const { t } = useTranslation();
   const tabs: { id: SecretTab; icon: "key" | "lock" | "note" | "fingerprint"; label: string }[] = [
     { id: "keys", icon: "key", label: t("nav.keys") },
@@ -75,33 +75,22 @@ function TabBar({
     { id: "notes", icon: "note", label: t("nav.notes") },
   ];
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: isMobile ? "wrap" : "nowrap" }}>
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          onClick={() => setTab(t.id)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            padding: "7px 14px",
-            borderRadius: 9,
-            cursor: "pointer",
-            fontFamily: UI,
-            fontSize: 13,
-            fontWeight: tab === t.id ? 700 : 600,
-            background: tab === t.id ? p.accentSoft : p.bg2,
-            color: tab === t.id ? p.accent : p.txt2,
-            border: `1px solid ${tab === t.id ? p.accentLine : p.line}`,
-          }}
-        >
-          <Icon name={t.icon} size={15} stroke={1.8} />
-          {t.label}
-          <span style={{ fontFamily: MONO, fontSize: 11, color: tab === t.id ? p.accent : p.txt3 }}>
-            {counts[t.id]}
-          </span>
-        </button>
-      ))}
+    <div style={{ overflowX: isMobile ? "auto" : "visible", minWidth: 0 }}>
+      <UnderlineTabs<SecretTab>
+        ariaLabel={t("nav.secrets")}
+        value={tab}
+        onChange={setTab}
+        tabs={tabs.map((tb) => ({
+          value: tb.id,
+          label: (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+              <Icon name={tb.icon} size={15} stroke={1.8} />
+              {tb.label}
+            </span>
+          ),
+          count: counts[tb.id],
+        }))}
+      />
     </div>
   );
 }
