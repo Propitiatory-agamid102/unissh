@@ -252,9 +252,8 @@ async fn grants_publish(
         "event": "access_grant", "vault_id": ids::b64(&vault_id),
         "new_epoch": new_epoch, "revoke_epoch": req.revoke_epoch, "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(auth.tenant_id(), &ev, Some(&vault_id), state.now())
+    state
+        .audit_event(auth.tenant_id(), &ev, Some(&vault_id))
         .await;
 
     Ok(Json(PublishResp {

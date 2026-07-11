@@ -125,10 +125,7 @@ async fn audit_observed(
         "device_id": ids::b64(device_id),
         "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(tid, &ev, None, state.now())
-        .await;
+    state.audit_event(tid, &ev, None).await;
 }
 
 // ---- bootstrap / register ----
@@ -1096,10 +1093,7 @@ async fn admin_set(
         "event": if req.is_admin { "admin_grant" } else { "admin_revoke" },
         "account_id": ids::b64(&target), "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(auth.tenant_id(), &ev, None, state.now())
-        .await;
+    state.audit_event(auth.tenant_id(), &ev, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

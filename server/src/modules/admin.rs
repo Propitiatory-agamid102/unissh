@@ -107,10 +107,7 @@ async fn tenant_status(
         "event": if req.suspended { "tenant_suspend" } else { "tenant_activate" },
         "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(admin.tenant_id(), &ev, None, state.now())
-        .await;
+    state.audit_event(admin.tenant_id(), &ev, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -158,10 +155,7 @@ async fn account_status(
         "event": if req.disabled { "account_disable" } else { "account_enable" },
         "account_id": ids::b64(&target), "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(admin.tenant_id(), &ev, None, state.now())
-        .await;
+    state.audit_event(admin.tenant_id(), &ev, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

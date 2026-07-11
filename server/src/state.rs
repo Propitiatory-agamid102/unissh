@@ -81,6 +81,17 @@ impl AppStateInner {
         self.clock.now_unix()
     }
 
+    /// Best-effort server-observed audit append. The caller owns the emitted
+    /// JSON shape (`ev`, including its own `"ts"` field); this only deduplicates
+    /// the `append_audit_server_observed(..).await` tail. Errors are swallowed
+    /// (audit is best-effort and must never fail a request).
+    pub async fn audit_event(&self, tid: &[u8], ev: &serde_json::Value, vault_id: Option<&[u8]>) {
+        let _ = self
+            .store
+            .append_audit_server_observed(tid, ev, vault_id, self.now())
+            .await;
+    }
+
     /// Live value of the defense-in-depth signature check (§2.4), hot-reloadable.
     pub fn validate_signatures(&self) -> bool {
         self.runtime.validate_signatures.load(Ordering::Relaxed)

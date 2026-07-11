@@ -161,13 +161,10 @@ pub fn sync_pull(
 
     let mut delta = transport.delta_since(last);
     // We do not trust the transport's order: we sort it ourselves.
-    delta.sort_by(|a, b| {
-        a.0.cmp(&b.0).then_with(|| {
-            let ab = a.1.to_bytes().unwrap_or_default();
-            let bb = b.1.to_bytes().unwrap_or_default();
-            ab.cmp(&bb)
-        })
-    });
+    // Key = (server_seq ASC, object bytes ASC as tie-break); `sort_by_cached_key`
+    // serializes each object once instead of on every comparison. Total order is
+    // identical to the previous `sort_by`, so the apply order is unchanged.
+    delta.sort_by_cached_key(|(seq, obj)| (*seq, obj.to_bytes().unwrap_or_default()));
 
     let mut report = SyncReport::default();
     let mut cursor = last;

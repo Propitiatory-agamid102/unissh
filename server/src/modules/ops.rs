@@ -136,10 +136,7 @@ async fn ops_tenant_status(
         "event": if req.suspended { "tenant_suspend" } else { "tenant_activate" },
         "by": "ops", "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(&tid, &ev, None, state.now())
-        .await;
+    state.audit_event(&tid, &ev, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -168,10 +165,7 @@ async fn ops_tenant_profile(
     let ev = json!({
         "event": "tenant_rename", "by": "ops", "display_name": dn, "ts": state.now(),
     });
-    let _ = state
-        .store
-        .append_audit_server_observed(&tid, &ev, None, state.now())
-        .await;
+    state.audit_event(&tid, &ev, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
