@@ -87,6 +87,14 @@ fn cert_item_id(key_item_id: &str) -> String {
     format!("{key_item_id}.cert")
 }
 
+/// Locks a `Mutex`, recovering from poisoning (the data under these locks is ordinary,
+/// not invariant-bearing, so a single panic must not permanently "jam" the FFI). Central
+/// helper for the `m.lock().unwrap_or_else(|e| e.into_inner())` idiom used across the
+/// [`Core`] state and the session/pool/tunnel types.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// FFI-boundary errors.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
@@ -1226,13 +1234,13 @@ impl Core {
 
     /// Creates a local vault.
     pub fn create_vault(&self, vault_id: String, name: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let id = vault_id.into_bytes();
-        Vault::create(&state.storage, &state.keyset, id.clone(), name.as_bytes())
-            .map_err(FfiError::other)?;
-        state.vault_names.insert(id, name);
-        Ok(())
+        self.with_state_mut(|state| {
+            let id = vault_id.into_bytes();
+            Vault::create(&state.storage, &state.keyset, id.clone(), name.as_bytes())
+                .map_err(FfiError::other)?;
+            state.vault_names.insert(id, name);
+            Ok(())
+        })
     }
 
     /// Creates a **cloud vault** (server-tz §4.2): `vault_id` = a random UUIDv4
@@ -1249,27 +1257,27 @@ impl Core {
                 msg: "cloud vault requires an active server (empty tenant)".into(),
             });
         }
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vid = unissh_vault::new_vault_id();
-        Vault::create_with_target(
-            &state.storage,
-            &state.keyset,
-            vid.clone(),
-            name.as_bytes(),
-            SyncTarget::Cloud,
-        )
-        .map_err(map_vault_err)?;
-        // Bind ONLY the freshly created vault by its vault_id (1:1), so as not to
-        // affect other unbound legacy cloud vaults (they must be bound to
-        // their own server, not this one).
-        state
-            .storage
-            .set_vault_tenant(&vid, tenant_b64.as_bytes())
-            .map_err(FfiError::other)?;
-        let vid_hex = hex::encode(&vid);
-        state.vault_names.insert(vid, name);
-        Ok(vid_hex)
+        self.with_state_mut(|state| {
+            let vid = unissh_vault::new_vault_id();
+            Vault::create_with_target(
+                &state.storage,
+                &state.keyset,
+                vid.clone(),
+                name.as_bytes(),
+                SyncTarget::Cloud,
+            )
+            .map_err(map_vault_err)?;
+            // Bind ONLY the freshly created vault by its vault_id (1:1), so as not to
+            // affect other unbound legacy cloud vaults (they must be bound to
+            // their own server, not this one).
+            state
+                .storage
+                .set_vault_tenant(&vid, tenant_b64.as_bytes())
+                .map_err(FfiError::other)?;
+            let vid_hex = hex::encode(&vid);
+            state.vault_names.insert(vid, name);
+            Ok(vid_hex)
+        })
     }
 
     /// **One-time binding of legacy cloud vaults to a server** (a 1:1-binding migration):
@@ -1283,13 +1291,13 @@ impl Core {
                 msg: "cannot bind cloud vaults to an empty tenant".into(),
             });
         }
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let n = state
-            .storage
-            .bind_unbound_cloud_vaults(tenant_b64.as_bytes())
-            .map_err(FfiError::other)?;
-        Ok(n as u32)
+        self.with_state(|state| {
+            let n = state
+                .storage
+                .bind_unbound_cloud_vaults(tenant_b64.as_bytes())
+                .map_err(FfiError::other)?;
+            Ok(n as u32)
+        })
     }
 
     /// Unbind all cloud vaults bound to `tenant_b64` (e.g. when
@@ -1299,13 +1307,13 @@ impl Core {
         if tenant_b64.is_empty() {
             return Ok(0);
         }
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let n = state
-            .storage
-            .clear_binding_for_tenant(tenant_b64.as_bytes())
-            .map_err(FfiError::other)?;
-        Ok(n as u32)
+        self.with_state(|state| {
+            let n = state
+                .storage
+                .clear_binding_for_tenant(tenant_b64.as_bytes())
+                .map_err(FfiError::other)?;
+            Ok(n as u32)
+        })
     }
 
     /// Bind ONE cloud vault (by hex `vault_id`) to the server `tenant_b64` (1:1).
@@ -1317,13 +1325,13 @@ impl Core {
             });
         }
         let vid = hex::decode(vault_id.trim()).map_err(|_| FfiError::other("invalid vault id"))?;
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        state
-            .storage
-            .set_vault_tenant(&vid, tenant_b64.as_bytes())
-            .map_err(FfiError::other)?;
-        Ok(())
+        self.with_state(|state| {
+            state
+                .storage
+                .set_vault_tenant(&vid, tenant_b64.as_bytes())
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Adds/promotes a member of a cloud vault (server-tz §5): extends the set
@@ -1340,82 +1348,82 @@ impl Core {
         let vid = decode_vid(&vault_id)?;
         let member_ed = decode_pubkey32("member_ed25519_pub", &member_ed25519_pub)?;
         let member_x = decode_pubkey32("member_x25519_pub", &member_x25519_pub)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
-        let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
+        self.with_state_mut(|state| {
+            let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
+            let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
 
-        // The owner is ALWAYS Admin of their own vault. "Adding" the owner as a member below
-        // via the upsert path would re-insert them with the passed role (e.g. Viewer); as
-        // soon as `verify_record_authority` requires `can_write`, the vault becomes
-        // unreadable for its own owner (an irreversible brick). We reject explicitly.
-        if member_ed == owner_ed {
-            return Err(FfiError::other(
-                "cannot add the vault owner as a member — the owner is always Admin",
-            ));
-        }
+            // The owner is ALWAYS Admin of their own vault. "Adding" the owner as a member below
+            // via the upsert path would re-insert them with the passed role (e.g. Viewer); as
+            // soon as `verify_record_authority` requires `can_write`, the vault becomes
+            // unreadable for its own owner (an irreversible brick). We reject explicitly.
+            if member_ed == owner_ed {
+                return Err(FfiError::other(
+                    "cannot add the vault owner as a member — the owner is always Admin",
+                ));
+            }
 
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
+            let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
 
-        // target set = current (if a manifest exists) ∪ {owner Admin, new member}.
-        let mut members: Vec<Member> = match state
-            .storage
-            .latest_membership_epoch(&vid)
-            .map_err(FfiError::other)?
-        {
-            Some(latest) => verify_chain_to_epoch(&state.storage, &vid, latest, &owner_ed)
-                .map_err(map_vault_err)?
-                .members()
-                .to_vec(),
-            None => Vec::new(),
-        };
-        // ensure owner=Admin is in the set
-        if !members.iter().any(|m| m.ed25519_pub == owner_ed) {
+            // target set = current (if a manifest exists) ∪ {owner Admin, new member}.
+            let mut members: Vec<Member> = match state
+                .storage
+                .latest_membership_epoch(&vid)
+                .map_err(FfiError::other)?
+            {
+                Some(latest) => verify_chain_to_epoch(&state.storage, &vid, latest, &owner_ed)
+                    .map_err(map_vault_err)?
+                    .members()
+                    .to_vec(),
+                None => Vec::new(),
+            };
+            // ensure owner=Admin is in the set
+            if !members.iter().any(|m| m.ed25519_pub == owner_ed) {
+                members.push(Member {
+                    ed25519_pub: owner_ed.clone(),
+                    role: MemberRole::Admin,
+                });
+            }
+            // upsert the new member (their role)
+            members.retain(|m| m.ed25519_pub != member_ed);
             members.push(Member {
-                ed25519_pub: owner_ed.clone(),
-                role: MemberRole::Admin,
+                ed25519_pub: member_ed.clone(),
+                role: role.to_core(),
             });
-        }
-        // upsert the new member (their role)
-        members.retain(|m| m.ed25519_pub != member_ed);
-        members.push(Member {
-            ed25519_pub: member_ed.clone(),
-            role: role.to_core(),
-        });
 
-        let x25519_by_ed = vec![(owner_ed.clone(), owner_x), (member_ed.clone(), member_x)];
-        vault
-            .establish_or_extend_membership(&state.keyset, &members, &x25519_by_ed)
-            .map_err(map_vault_err)?;
-        Ok(())
+            let x25519_by_ed = vec![(owner_ed.clone(), owner_x), (member_ed.clone(), member_x)];
+            vault
+                .establish_or_extend_membership(&state.keyset, &members, &x25519_by_ed)
+                .map_err(map_vault_err)?;
+            Ok(())
+        })
     }
 
     /// List of a cloud vault's members at the latest epoch (public keys + role +
     /// fingerprint). Empty if there is no membership yet.
     pub fn list_members(&self, vault_id: String) -> Result<Vec<MemberInfo>, FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
-        let latest = match state
-            .storage
-            .latest_membership_epoch(&vid)
-            .map_err(FfiError::other)?
-        {
-            Some(l) => l,
-            None => return Ok(Vec::new()),
-        };
-        let verified = verify_chain_to_epoch(&state.storage, &vid, latest, &owner_ed)
-            .map_err(map_vault_err)?;
-        Ok(verified
-            .members()
-            .iter()
-            .map(|m| MemberInfo {
-                ed25519_pub_hex: hex::encode(&m.ed25519_pub),
-                role: FfiMemberRole::from_core(m.role),
-                fingerprint: member_fingerprint(&m.ed25519_pub),
-            })
-            .collect())
+        self.with_state_mut(|state| {
+            let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
+            let latest = match state
+                .storage
+                .latest_membership_epoch(&vid)
+                .map_err(FfiError::other)?
+            {
+                Some(l) => l,
+                None => return Ok(Vec::new()),
+            };
+            let verified = verify_chain_to_epoch(&state.storage, &vid, latest, &owner_ed)
+                .map_err(map_vault_err)?;
+            Ok(verified
+                .members()
+                .iter()
+                .map(|m| MemberInfo {
+                    ed25519_pub_hex: hex::encode(&m.ed25519_pub),
+                    role: FfiMemberRole::from_core(m.role),
+                    fingerprint: member_fingerprint(&m.ed25519_pub),
+                })
+                .collect())
+        })
     }
 
     /// OOB fingerprint of a member's Ed25519 pubkey (hex(SHA-256), 64 characters) — for
@@ -1434,9 +1442,9 @@ impl Core {
         ed25519_pub: String,
     ) -> Result<(), FfiError> {
         let ed = decode_pubkey32("ed25519_pub", &ed25519_pub)?;
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        pin_and_verify_member(&state.storage, account_id.as_bytes(), &ed).map_err(map_vault_err)
+        self.with_state(|state| {
+            pin_and_verify_member(&state.storage, account_id.as_bytes(), &ed).map_err(map_vault_err)
+        })
     }
 
     /// Confirms (TOFU-pins) the genesis owner (creator-pubkey) of a vault created
@@ -1452,17 +1460,17 @@ impl Core {
     ) -> Result<(), FfiError> {
         let vid = decode_vid(&vault_id)?;
         let ed = decode_pubkey32("ed25519_pub", &ed25519_pub)?;
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        // The anchor is pinned ONLY for others' (teammate) vaults. Pinning your own keyset as
-        // a "teammate's genesis owner" is almost certainly a mistake/mis-anchoring: your own
-        // vaults are authorized by the local keyset anyway (the fallback). We reject explicitly.
-        if ed == state.keyset.signing.verifying.to_bytes() {
-            return Err(FfiError::Other {
-                msg: "cannot pin your own keyset as a vault trust anchor".into(),
-            });
-        }
-        pin_and_verify_vault_anchor(&state.storage, &vid, &ed).map_err(map_vault_err)
+        self.with_state(|state| {
+            // The anchor is pinned ONLY for others' (teammate) vaults. Pinning your own keyset as
+            // a "teammate's genesis owner" is almost certainly a mistake/mis-anchoring: your own
+            // vaults are authorized by the local keyset anyway (the fallback). We reject explicitly.
+            if ed == state.keyset.signing.verifying.to_bytes() {
+                return Err(FfiError::Other {
+                    msg: "cannot pin your own keyset as a vault trust anchor".into(),
+                });
+            }
+            pin_and_verify_vault_anchor(&state.storage, &vid, &ed).map_err(map_vault_err)
+        })
     }
 
     /// Assigns the account's PERSONAL vault (A3.2): the pointer is stored in per-account
@@ -1519,15 +1527,15 @@ impl Core {
             Some(p) if !p.personal_vault_id.is_empty() => p.personal_vault_id,
             _ => return Ok(None),
         };
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let display = match state.storage.get_vault(&raw).map_err(FfiError::other)? {
-            Some(rec) if !matches!(rec.sync_target, SyncTarget::Cloud) => {
-                String::from_utf8_lossy(&raw).to_string()
-            }
-            _ => hex::encode(&raw),
-        };
-        Ok(Some(display))
+        self.with_state(|state| {
+            let display = match state.storage.get_vault(&raw).map_err(FfiError::other)? {
+                Some(rec) if !matches!(rec.sync_target, SyncTarget::Cloud) => {
+                    String::from_utf8_lossy(&raw).to_string()
+                }
+                _ => hex::encode(&raw),
+            };
+            Ok(Some(display))
+        })
     }
 
     /// Account-default username, if set.
@@ -1553,35 +1561,35 @@ impl Core {
         remaining_member_pubkeys: Vec<RemainingMember>,
     ) -> Result<u64, FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
-        let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
+        self.with_state(|state| {
+            let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
+            let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
 
-        // build the remaining set: the owner as Admin + those passed in.
-        let mut members: Vec<Member> = vec![Member {
-            ed25519_pub: owner_ed.clone(),
-            role: MemberRole::Admin,
-        }];
-        let mut grants: Vec<(Vec<u8>, Vec<u8>, MemberRole)> =
-            vec![(owner_x, owner_ed.clone(), MemberRole::Admin)];
-        for rm in &remaining_member_pubkeys {
-            let ed = decode_pubkey32("ed25519", &rm.ed25519_pub_hex)?;
-            let x = decode_pubkey32("x25519", &rm.x25519_pub_hex)?;
-            if ed == owner_ed {
-                continue; // the owner is already added
+            // build the remaining set: the owner as Admin + those passed in.
+            let mut members: Vec<Member> = vec![Member {
+                ed25519_pub: owner_ed.clone(),
+                role: MemberRole::Admin,
+            }];
+            let mut grants: Vec<(Vec<u8>, Vec<u8>, MemberRole)> =
+                vec![(owner_x, owner_ed.clone(), MemberRole::Admin)];
+            for rm in &remaining_member_pubkeys {
+                let ed = decode_pubkey32("ed25519", &rm.ed25519_pub_hex)?;
+                let x = decode_pubkey32("x25519", &rm.x25519_pub_hex)?;
+                if ed == owner_ed {
+                    continue; // the owner is already added
+                }
+                members.push(Member {
+                    ed25519_pub: ed.clone(),
+                    role: rm.role.to_core(),
+                });
+                grants.push((x, ed, rm.role.to_core()));
             }
-            members.push(Member {
-                ed25519_pub: ed.clone(),
-                role: rm.role.to_core(),
-            });
-            grants.push((x, ed, rm.role.to_core()));
-        }
 
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
-        vault
-            .rotate_vk(&state.keyset, &members, &grants)
-            .map_err(map_vault_err)
+            let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
+            vault
+                .rotate_vk(&state.keyset, &members, &grants)
+                .map_err(map_vault_err)
+        })
     }
 
     /// **Cooperative hard-delete** of a cloud vault (server-tz §6.4): physically
@@ -1589,43 +1597,43 @@ impl Core {
     /// Best-effort/hygiene, NOT a remote wipe (a modified client will keep the data).
     pub fn purge_vault(&self, vault_id: String) -> Result<(), FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
-        vault.purge_vault().map_err(map_vault_err)?;
-        state.vault_names.remove(&vid);
-        Ok(())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
+            vault.purge_vault().map_err(map_vault_err)?;
+            state.vault_names.remove(&vid);
+            Ok(())
+        })
     }
 
     /// Member-aware integrity audit of a cloud vault (server-tz §6.2): the D1 chain +
     /// the epoch floor. A report with no secrets. (For local vaults — `verify_vault_integrity`.)
     pub fn verify_chain(&self, vault_id: String) -> Result<VaultIntegrityReport, FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
-        let report = vault.verify_chain().map_err(map_vault_err)?;
-        Ok(integrity_report_to_ffi(report))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
+            let report = vault.verify_chain().map_err(map_vault_err)?;
+            Ok(integrity_report_to_ffi(report))
+        })
     }
 
     /// Local account-id (server-tz §2.1): generated once and persisted in
     /// storage-meta; subsequent calls return the same id. A public
     /// identifier (NOT a secret), hex (16 bytes). Requires unlock (storage).
     pub fn account_id(&self) -> Result<String, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let id = ensure_account_id(&state.storage)?;
-        Ok(hex::encode(id))
+        self.with_state(|state| {
+            let id = ensure_account_id(&state.storage)?;
+            Ok(hex::encode(id))
+        })
     }
 
     /// A self-attested registration blob (server-tz §2.1): binds the account-id to the
     /// keyset's public keys and signs it with the keyset's Ed25519 key. An opaque
     /// signed blob (NOT a secret) — published to the server. Requires unlock.
     pub fn build_registration(&self) -> Result<Vec<u8>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let id = ensure_account_id(&state.storage)?;
-        build_registration(&state.keyset, &id).map_err(map_keychain_err)
+        self.with_state(|state| {
+            let id = ensure_account_id(&state.storage)?;
+            build_registration(&state.keyset, &id).map_err(map_keychain_err)
+        })
     }
 
     /// Like [`Core::build_registration`], but returns BOTH the canonical payload AND
@@ -1633,12 +1641,12 @@ impl Core {
     /// `registration_signature`). The payload is built in the core so the UI doesn't rebuild
     /// the canonical form (a risk of byte desync → verification failure on the server).
     pub fn build_registration_request(&self) -> Result<RegistrationRequest, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let id = ensure_account_id(&state.storage)?;
-        let (payload, signature) =
-            build_registration_request(&state.keyset, &id).map_err(map_keychain_err)?;
-        Ok(RegistrationRequest { payload, signature })
+        self.with_state(|state| {
+            let id = ensure_account_id(&state.storage)?;
+            let (payload, signature) =
+                build_registration_request(&state.keyset, &id).map_err(map_keychain_err)?;
+            Ok(RegistrationRequest { payload, signature })
+        })
     }
 
     /// Signs a server challenge with the keyset's Ed25519 key (server-tz §2.2,
@@ -1654,17 +1662,17 @@ impl Core {
         nonce: Vec<u8>,
         expiry: u64,
     ) -> Result<Vec<u8>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let challenge = ServerAuthChallenge {
-            host: host.into_bytes(),
-            account_id: account_id.into_bytes(),
-            device_id: device_id.into_bytes(),
-            key_id: key_id.into_bytes(),
-            nonce,
-            expiry,
-        };
-        sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
+        self.with_state(|state| {
+            let challenge = ServerAuthChallenge {
+                host: host.into_bytes(),
+                account_id: account_id.into_bytes(),
+                device_id: device_id.into_bytes(),
+                key_id: key_id.into_bytes(),
+                nonce,
+                expiry,
+            };
+            sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
+        })
     }
 
     /// Like [`Core::sign_server_challenge`], but takes the identifiers as **raw
@@ -1684,30 +1692,30 @@ impl Core {
         nonce: Vec<u8>,
         expiry: u64,
     ) -> Result<Vec<u8>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let challenge = ServerAuthChallenge {
-            host,
-            account_id,
-            device_id,
-            key_id,
-            nonce,
-            expiry,
-        };
-        sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
+        self.with_state(|state| {
+            let challenge = ServerAuthChallenge {
+                host,
+                account_id,
+                device_id,
+                key_id,
+                nonce,
+                expiry,
+            };
+            sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
+        })
     }
 
     /// Reads a vault's cache policy (server-tz §6.6). `vault_id` is hex (cloud).
     pub fn get_cache_policy(&self, vault_id: String) -> Result<FfiCachePolicy, FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let rec = state
-            .storage
-            .get_vault(&vid)
-            .map_err(FfiError::other)?
-            .ok_or(FfiError::NotFound)?;
-        Ok(FfiCachePolicy::from_core(rec.cache_policy))
+        self.with_state_mut(|state| {
+            let rec = state
+                .storage
+                .get_vault(&vid)
+                .map_err(FfiError::other)?
+                .ok_or(FfiError::NotFound)?;
+            Ok(FfiCachePolicy::from_core(rec.cache_policy))
+        })
     }
 
     /// Changes a vault's cache policy (version+1, re-signs the record). `vault_id` is hex.
@@ -1717,12 +1725,13 @@ impl Core {
         policy: FfiCachePolicy,
     ) -> Result<(), FfiError> {
         let vid = decode_vid(&vault_id)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let mut vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
-        vault
-            .set_cache_policy(policy.to_core())
-            .map_err(map_vault_err)
+        self.with_state_mut(|state| {
+            let mut vault =
+                Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
+            vault
+                .set_cache_policy(policy.to_core())
+                .map_err(map_vault_err)
+        })
     }
 
     /// Appends a signed audit entry (server-tz §8): storage stores
@@ -1740,32 +1749,32 @@ impl Core {
         let _vid = decode_vid(&vault_id)?; // format validation (for the future)
         let author = hex::decode(author_pubkey.trim())
             .map_err(|_| FfiError::other("invalid hex author_pubkey"))?;
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        state
-            .storage
-            .append_audit(&entry_blob, &signature, &author)
-            .map_err(FfiError::other)
+        self.with_state(|state| {
+            state
+                .storage
+                .append_audit(&entry_blob, &signature, &author)
+                .map_err(FfiError::other)
+        })
     }
 
     /// Audit entries with `seq > since_seq` (server-tz §8, admin view). The blobs
     /// are opaque; seq is public metadata (NOT trusted for tamper-evidence in v1).
     pub fn audit_query(&self, since_seq: u64) -> Result<Vec<FfiAuditEntry>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        Ok(state
-            .storage
-            .list_audit(since_seq)
-            .map_err(FfiError::other)?
-            .into_iter()
-            .map(|e| FfiAuditEntry {
-                seq: e.seq,
-                entry_blob: e.entry_blob,
-                signature: e.signature,
-                author_pubkey_hex: hex::encode(&e.author_pubkey),
-                recorded_at: e.recorded_at,
-            })
-            .collect())
+        self.with_state(|state| {
+            Ok(state
+                .storage
+                .list_audit(since_seq)
+                .map_err(FfiError::other)?
+                .into_iter()
+                .map(|e| FfiAuditEntry {
+                    seq: e.seq,
+                    entry_blob: e.entry_blob,
+                    signature: e.signature,
+                    author_pubkey_hex: hex::encode(&e.author_pubkey),
+                    recorded_at: e.recorded_at,
+                })
+                .collect())
+        })
     }
 
     /// **Onboarding Path A** (server-tz §9): a new device accepts an encrypted
@@ -1880,22 +1889,19 @@ impl Core {
         msg2: Vec<u8>,
         secret_key_hex: String,
     ) -> Result<Vec<u8>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let secret_key_hex = Zeroizing::new(secret_key_hex);
-        let sk_bytes = Zeroizing::new(
-            hex::decode(secret_key_hex.trim()).map_err(|_| FfiError::InvalidCredentials)?,
-        );
-        let secret_key =
-            SecretKey::from_slice(&sk_bytes).map_err(|_| FfiError::InvalidCredentials)?;
-        let init = handle
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .ok_or_else(|| FfiError::other("onboard initiator step already consumed"))?;
-        init.confirm_and_seal(&msg2, &state.keyset, &secret_key)
-            .map_err(map_keychain_err)
+        self.with_state(|state| {
+            let secret_key_hex = Zeroizing::new(secret_key_hex);
+            let sk_bytes = Zeroizing::new(
+                hex::decode(secret_key_hex.trim()).map_err(|_| FfiError::InvalidCredentials)?,
+            );
+            let secret_key =
+                SecretKey::from_slice(&sk_bytes).map_err(|_| FfiError::InvalidCredentials)?;
+            let init = lock_recover(&handle.inner)
+                .take()
+                .ok_or_else(|| FfiError::other("onboard initiator step already consumed"))?;
+            init.confirm_and_seal(&msg2, &state.keyset, &secret_key)
+                .map_err(map_keychain_err)
+        })
     }
 
     /// **Onboarding Path B (responder):** accepts `msg3`, verifies the confirmation,
@@ -1916,10 +1922,7 @@ impl Core {
             return Err(FfiError::AlreadyExists);
         }
         let password = password.map(Zeroizing::new);
-        let resp = handle
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let resp = lock_recover(&handle.inner)
             .take()
             .ok_or_else(|| FfiError::other("onboard responder step already consumed"))?;
         let (secret_key, enc, unlocked) = resp
@@ -1986,40 +1989,36 @@ impl Core {
         transport: Arc<dyn FfiSyncTransport>,
         tenant_b64: String,
     ) -> Result<FfiSyncReport, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let genesis_owner = state.keyset.signing.verifying.to_bytes().to_vec();
-        let ctx = SyncContext {
-            genesis_owner,
-            tenant: tenant_b64.as_bytes().to_vec(),
-        };
-        let mut adapter = ForeignTransportAdapter {
-            inner: transport,
-            push_err: Mutex::new(None),
-        };
+        self.with_state_mut(|state| {
+            let genesis_owner = state.keyset.signing.verifying.to_bytes().to_vec();
+            let ctx = SyncContext {
+                genesis_owner,
+                tenant: tenant_b64.as_bytes().to_vec(),
+            };
+            let mut adapter = ForeignTransportAdapter {
+                inner: transport,
+                push_err: Mutex::new(None),
+            };
 
-        // push: if the callback threw — propagate its error (don't mask it as Format).
-        let push = sync_push(&mut adapter, &state.storage, tenant_b64.as_bytes()).map_err(|e| {
-            if let Some(fe) = adapter
-                .push_err
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-            {
-                fe
-            } else {
-                map_sync_err(e)
-            }
-        })?;
-        // pull
-        let pull = sync_pull(&mut adapter, &state.storage, &ctx).map_err(map_sync_err)?;
+            // push: if the callback threw — propagate its error (don't mask it as Format).
+            let push =
+                sync_push(&mut adapter, &state.storage, tenant_b64.as_bytes()).map_err(|e| {
+                    if let Some(fe) = lock_recover(&adapter.push_err).take() {
+                        fe
+                    } else {
+                        map_sync_err(e)
+                    }
+                })?;
+            // pull
+            let pull = sync_pull(&mut adapter, &state.storage, &ctx).map_err(map_sync_err)?;
 
-        Ok(FfiSyncReport {
-            applied: pull.applied,
-            skipped_stale: pull.skipped_stale,
-            conflicts: pull.conflicts.len() as u32,
-            rejected: pull.rejected.len() as u32,
-            pushed: push.pushed,
+            Ok(FfiSyncReport {
+                applied: pull.applied,
+                skipped_stale: pull.skipped_stale,
+                conflicts: pull.conflicts.len() as u32,
+                rejected: pull.rejected.len() as u32,
+                pushed: push.pushed,
+            })
         })
     }
 
@@ -2031,9 +2030,9 @@ impl Core {
     /// `tenant_b64` is the same string passed to `sync_now` (the cursor key
     /// is built from its bytes). Requires unlock.
     pub fn reset_pull_cursor(&self, tenant_b64: String) -> Result<(), FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        reset_pull_cursor(&state.storage, tenant_b64.as_bytes()).map_err(map_sync_err)
+        self.with_state(|state| {
+            reset_pull_cursor(&state.storage, tenant_b64.as_bytes()).map_err(map_sync_err)
+        })
     }
 
     /// Restores cloud vaults deleted LOCALLY (tombstoned) but still
@@ -2047,77 +2046,78 @@ impl Core {
     /// (after unlinking); others are left untouched. Returns the number of records purged.
     /// Requires unlock.
     pub fn restore_deleted_cloud_vaults(&self, tenant_b64: String) -> Result<u32, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let tenant = tenant_b64.as_bytes();
-        let mut restored = 0u32;
-        for v in state
-            .storage
-            .list_tombstoned_cloud_vaults()
-            .map_err(FfiError::other)?
-        {
-            if !v.sync_tenant.is_empty() && v.sync_tenant != tenant {
-                continue; // bound to ANOTHER server — not ours, don't touch
-            }
-            state
+        self.with_state_mut(|state| {
+            let tenant = tenant_b64.as_bytes();
+            let mut restored = 0u32;
+            for v in state
                 .storage
-                .purge_vault_data(&v.vault_id)
-                .map_err(FfiError::other)?;
-            state.vault_names.remove(&v.vault_id);
-            restored += 1;
-        }
-        if restored > 0 {
-            reset_pull_cursor(&state.storage, tenant).map_err(map_sync_err)?;
-        }
-        Ok(restored)
+                .list_tombstoned_cloud_vaults()
+                .map_err(FfiError::other)?
+            {
+                if !v.sync_tenant.is_empty() && v.sync_tenant != tenant {
+                    continue; // bound to ANOTHER server — not ours, don't touch
+                }
+                state
+                    .storage
+                    .purge_vault_data(&v.vault_id)
+                    .map_err(FfiError::other)?;
+                state.vault_names.remove(&v.vault_id);
+                restored += 1;
+            }
+            if restored > 0 {
+                reset_pull_cursor(&state.storage, tenant).map_err(map_sync_err)?;
+            }
+            Ok(restored)
+        })
     }
 
     /// Renames a vault.
     pub fn rename_vault(&self, vault_id: String, new_name: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        // Resolve once: the name cache is keyed by the RAW vault id (the storage
-        // key), so for a cloud vault we must insert under the decoded UUID bytes,
-        // not the hex string — otherwise list_vaults reads a stale name.
-        let vid = resolve_vid(&state.storage, &vault_id);
-        let mut vault =
-            Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
-        vault
-            .set_name(new_name.as_bytes())
-            .map_err(FfiError::other)?;
-        state.vault_names.insert(vid, new_name);
-        Ok(())
+        self.with_state_mut(|state| {
+            // Resolve once: the name cache is keyed by the RAW vault id (the storage
+            // key), so for a cloud vault we must insert under the decoded UUID bytes,
+            // not the hex string — otherwise list_vaults reads a stale name.
+            let vid = resolve_vid(&state.storage, &vault_id);
+            let mut vault =
+                Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
+            vault
+                .set_name(new_name.as_bytes())
+                .map_err(FfiError::other)?;
+            state.vault_names.insert(vid, new_name);
+            Ok(())
+        })
     }
 
     /// Deletes a vault (tombstone). It disappears from the list.
     pub fn delete_vault(&self, vault_id: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vid = resolve_vid(&state.storage, &vault_id);
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
-        vault.delete().map_err(FfiError::other)?;
-        state.vault_names.remove(vid.as_slice());
-        Ok(())
+        self.with_state_mut(|state| {
+            let vid = resolve_vid(&state.storage, &vault_id);
+            let vault =
+                Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
+            vault.delete().map_err(FfiError::other)?;
+            state.vault_names.remove(vid.as_slice());
+            Ok(())
+        })
     }
 
     /// Deletes an item (tombstone) and, if it was an SSH key in the agent, unloads it.
     pub fn delete_item(&self, vault_id: String, item_id: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .delete_item(item_id.as_bytes())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
-        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
-        // a revoked/rotated private key stays alive in the agent until the end of the session.
-        state.agent.remove(&agent_key_id(&vault_id, &item_id));
-        Ok(())
+            vault
+                .delete_item(item_id.as_bytes())
+                .map_err(FfiError::other)?;
+            // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+            // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+            // a revoked/rotated private key stays alive in the agent until the end of the session.
+            state.agent.remove(&agent_key_id(&vault_id, &item_id));
+            Ok(())
+        })
     }
 
     /// Saves/updates a server password as a vault item (type "password").
@@ -2132,24 +2132,24 @@ impl Core {
     ) -> Result<(), FfiError> {
         // The password goes into Zeroizing immediately — zeroized on exit.
         let password = Zeroizing::new(password);
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            item_id.as_bytes(),
-            ITEM_TYPE_PASSWORD,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item_keep_history(item_id.as_bytes(), ITEM_TYPE_PASSWORD, password.as_bytes())
+        self.with_state_mut(|state| {
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
+                item_id.as_bytes(),
+                ITEM_TYPE_PASSWORD,
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        Ok(())
+            vault
+                .put_item_keep_history(item_id.as_bytes(), ITEM_TYPE_PASSWORD, password.as_bytes())
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Returns a server password (reveal: display/copy in the UI on an explicit
@@ -2160,10 +2160,10 @@ impl Core {
     /// ⚠️ The returned `String` crosses the FFI boundary and on the other side is not
     /// zeroized — the UI is responsible for a minimal lifetime (display/clipboard).
     pub fn get_password(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let password = read_password_item(state, &vault_id, &item_id)?;
-        Ok(password.as_str().to_string())
+        self.with_state_mut(|state| {
+            let password = read_password_item(state, &vault_id, &item_id)?;
+            Ok(password.as_str().to_string())
+        })
     }
 
     /// Saves/updates an encrypted note as a vault item (type "note").
@@ -2177,24 +2177,24 @@ impl Core {
         text: String,
     ) -> Result<(), FfiError> {
         let text = Zeroizing::new(text);
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            item_id.as_bytes(),
-            ITEM_TYPE_NOTE,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item_keep_history(item_id.as_bytes(), ITEM_TYPE_NOTE, text.as_bytes())
+        self.with_state_mut(|state| {
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
+                item_id.as_bytes(),
+                ITEM_TYPE_NOTE,
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        Ok(())
+            vault
+                .put_item_keep_history(item_id.as_bytes(), ITEM_TYPE_NOTE, text.as_bytes())
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Returns a note's text (reveal for the UI). Works **only** for an item of type
@@ -2203,10 +2203,10 @@ impl Core {
     /// ⚠️ The returned `String` crosses the FFI boundary and is not zeroized there — the UI
     /// is responsible for its lifetime.
     pub fn get_note(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let text = read_utf8_item(state, &vault_id, &item_id, ITEM_TYPE_NOTE, "a note")?;
-        Ok(text.as_str().to_string())
+        self.with_state_mut(|state| {
+            let text = read_utf8_item(state, &vault_id, &item_id, ITEM_TYPE_NOTE, "a note")?;
+            Ok(text.as_str().to_string())
+        })
     }
 
     /// Item versions available for reveal: the current one + archived ones (the secret's history).
@@ -2216,17 +2216,17 @@ impl Core {
         vault_id: String,
         item_id: String,
     ) -> Result<Vec<u64>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .list_item_versions(item_id.as_bytes())
-            .map_err(FfiError::other)
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            vault
+                .list_item_versions(item_id.as_bytes())
+                .map_err(FfiError::other)
+        })
     }
 
     /// Reveal of a specific password version from history (type-gated to "password").
@@ -2257,30 +2257,30 @@ impl Core {
 
     /// List of pinned host keys (for the known_hosts screen).
     pub fn list_known_hosts(&self) -> Result<Vec<KnownHostInfo>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        Ok(state
-            .storage
-            .list_known_hosts()
-            .map_err(FfiError::other)?
-            .into_iter()
-            .map(|h| KnownHostInfo {
-                host: h.host,
-                port: h.port,
-                key: String::from_utf8_lossy(&h.host_key).to_string(),
-                added_at: h.added_at,
-            })
-            .collect())
+        self.with_state_mut(|state| {
+            Ok(state
+                .storage
+                .list_known_hosts()
+                .map_err(FfiError::other)?
+                .into_iter()
+                .map(|h| KnownHostInfo {
+                    host: h.host,
+                    port: h.port,
+                    key: String::from_utf8_lossy(&h.host_key).to_string(),
+                    added_at: h.added_at,
+                })
+                .collect())
+        })
     }
 
     /// "Forget" a pinned host key. Returns whether there was a record.
     pub fn forget_host(&self, host: String, port: u16) -> Result<bool, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        state
-            .storage
-            .remove_known_host(&host, port)
-            .map_err(FfiError::other)
+        self.with_state_mut(|state| {
+            state
+                .storage
+                .remove_known_host(&host, port)
+                .map_err(FfiError::other)
+        })
     }
 
     /// Deliberately trust a NEW host key after [`FfiError::HostKeyMismatch`]:
@@ -2299,25 +2299,25 @@ impl Core {
         port: u16,
         expected_fingerprint: String,
     ) -> Result<String, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        self.rt
-            .block_on(trust_host_key(
-                &host,
-                port,
-                &state.storage,
-                &expected_fingerprint,
-            ))
-            .map_err(|e| match e {
-                unissh_ssh_transport::TransportError::FingerprintMismatch { got, .. } => {
-                    FfiError::HostKeyMismatch {
-                        host: host.clone(),
-                        port,
-                        fingerprint: got,
+        self.with_state(|state| {
+            self.rt
+                .block_on(trust_host_key(
+                    &host,
+                    port,
+                    &state.storage,
+                    &expected_fingerprint,
+                ))
+                .map_err(|e| match e {
+                    unissh_ssh_transport::TransportError::FingerprintMismatch { got, .. } => {
+                        FfiError::HostKeyMismatch {
+                            host: host.clone(),
+                            port,
+                            fingerprint: got,
+                        }
                     }
-                }
-                other => map_transport_err(other),
-            })
+                    other => map_transport_err(other),
+                })
+        })
     }
 
     /// Changes the instance master password (re-wraps the keyset under a new Unlock Key).
@@ -2394,78 +2394,78 @@ impl Core {
     /// List of vaults. Names come from the cache; for uncached vaults —
     /// a single VK unwrap (HPKE) with caching.
     pub fn list_vaults(&self) -> Result<Vec<VaultInfo>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let mut out = Vec::new();
-        for record in state.storage.list_vaults().map_err(FfiError::other)? {
-            let name = match state.vault_names.get(&record.vault_id) {
-                Some(n) => n.clone(),
-                None => {
-                    let vault = Vault::open(&state.storage, &state.keyset, &record.vault_id)
-                        .map_err(FfiError::other)?;
-                    let name = String::from_utf8_lossy(vault.name()).to_string();
-                    state
-                        .vault_names
-                        .insert(record.vault_id.clone(), name.clone());
-                    name
-                }
-            };
-            // A cloud vault_id is a UUIDv4 (raw 16 bytes, not UTF-8): we return it as hex
-            // so it matches the return of `create_cloud_vault` and is accepted by
-            // the cloud methods (`decode_vid` expects hex). A local vault_id is a meaningful
-            // UTF-8 string (round-trips via `as_bytes`), returned as-is.
-            let vault_id = match record.sync_target {
-                SyncTarget::Cloud => hex::encode(&record.vault_id),
-                _ => String::from_utf8_lossy(&record.vault_id).to_string(),
-            };
-            // sync_tenant is stored as the bytes of the base64 tenant_id string (an opaque
-            // routing label). Empty = not bound → None. Otherwise we return the same
-            // base64 string back so the UI can match the vault to its associated server.
-            let sync_tenant = if record.sync_tenant.is_empty() {
-                None
-            } else {
-                Some(String::from_utf8_lossy(&record.sync_tenant).to_string())
-            };
-            out.push(VaultInfo {
-                vault_id,
-                name,
-                sync_target: FfiSyncTarget::from_core(record.sync_target),
-                sync_tenant,
-            });
-        }
-        Ok(out)
+        self.with_state_mut(|state| {
+            let mut out = Vec::new();
+            for record in state.storage.list_vaults().map_err(FfiError::other)? {
+                let name = match state.vault_names.get(&record.vault_id) {
+                    Some(n) => n.clone(),
+                    None => {
+                        let vault = Vault::open(&state.storage, &state.keyset, &record.vault_id)
+                            .map_err(FfiError::other)?;
+                        let name = String::from_utf8_lossy(vault.name()).to_string();
+                        state
+                            .vault_names
+                            .insert(record.vault_id.clone(), name.clone());
+                        name
+                    }
+                };
+                // A cloud vault_id is a UUIDv4 (raw 16 bytes, not UTF-8): we return it as hex
+                // so it matches the return of `create_cloud_vault` and is accepted by
+                // the cloud methods (`decode_vid` expects hex). A local vault_id is a meaningful
+                // UTF-8 string (round-trips via `as_bytes`), returned as-is.
+                let vault_id = match record.sync_target {
+                    SyncTarget::Cloud => hex::encode(&record.vault_id),
+                    _ => String::from_utf8_lossy(&record.vault_id).to_string(),
+                };
+                // sync_tenant is stored as the bytes of the base64 tenant_id string (an opaque
+                // routing label). Empty = not bound → None. Otherwise we return the same
+                // base64 string back so the UI can match the vault to its associated server.
+                let sync_tenant = if record.sync_tenant.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&record.sync_tenant).to_string())
+                };
+                out.push(VaultInfo {
+                    vault_id,
+                    name,
+                    sync_target: FfiSyncTarget::from_core(record.sync_target),
+                    sync_tenant,
+                });
+            }
+            Ok(out)
+        })
     }
 
     /// Generates an Ed25519 SSH key **in the core**, stores the private key encrypted in
     /// the vault and returns the **public** key (OpenSSH). The private key is not handed out.
     pub fn generate_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let (private_pem, public) = generate_ed25519_openssh().map_err(FfiError::ssh)?;
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            item_id.as_bytes(),
-            ITEM_TYPE_SSH_KEY,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item(
+        self.with_state_mut(|state| {
+            let (private_pem, public) = generate_ed25519_openssh().map_err(FfiError::ssh)?;
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
                 item_id.as_bytes(),
                 ITEM_TYPE_SSH_KEY,
-                private_pem.as_bytes(),
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
             )
             .map_err(FfiError::other)?;
-        // The key material was replaced under the same id → unload the previous private key from
-        // the agent (namespaced), otherwise connects in this session will keep signing
-        // with the OLD key (load_key_into_agent short-circuits on agent.contains).
-        state.agent.remove(&agent_key_id(&vault_id, &item_id));
-        Ok(public)
+            vault
+                .put_item(
+                    item_id.as_bytes(),
+                    ITEM_TYPE_SSH_KEY,
+                    private_pem.as_bytes(),
+                )
+                .map_err(FfiError::other)?;
+            // The key material was replaced under the same id → unload the previous private key from
+            // the agent (namespaced), otherwise connects in this session will keep signing
+            // with the OLD key (load_key_into_agent short-circuits on agent.contains).
+            state.agent.remove(&agent_key_id(&vault_id, &item_id));
+            Ok(public)
+        })
     }
 
     /// Imports an existing OpenSSH private key into the vault. Returns the public
@@ -2480,47 +2480,47 @@ impl Core {
         // We keep the private key and password in Zeroizing — zeroized on exit.
         let openssh_private = Zeroizing::new(openssh_private);
         let passphrase = passphrase.map(Zeroizing::new);
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        // We accept not only the OpenSSH container but also classic PEM
-        // (PKCS#1 `BEGIN RSA PRIVATE KEY`, SEC1 `BEGIN EC PRIVATE KEY`,
-        // PKCS#8 `BEGIN PRIVATE KEY`, including password-encrypted ones): we normalize to
-        // a canonical OpenSSH private key. Without a password for an encrypted key
-        // an `Encrypted` error is returned — the UI will prompt for a password and retry.
-        let normalized = unissh_ssh_agent::normalize_private_key_with_passphrase(
-            &openssh_private,
-            passphrase.as_deref().map(|p| p.as_str()),
-        )
-        .map_err(FfiError::ssh)?;
-        // validate and extract the public key via a temporary agent
-        let mut tmp = InMemoryAgent::new();
-        tmp.add_from_openssh(b"tmp".to_vec(), normalized.as_bytes())
+        self.with_state_mut(|state| {
+            // We accept not only the OpenSSH container but also classic PEM
+            // (PKCS#1 `BEGIN RSA PRIVATE KEY`, SEC1 `BEGIN EC PRIVATE KEY`,
+            // PKCS#8 `BEGIN PRIVATE KEY`, including password-encrypted ones): we normalize to
+            // a canonical OpenSSH private key. Without a password for an encrypted key
+            // an `Encrypted` error is returned — the UI will prompt for a password and retry.
+            let normalized = unissh_ssh_agent::normalize_private_key_with_passphrase(
+                &openssh_private,
+                passphrase.as_deref().map(|p| p.as_str()),
+            )
             .map_err(FfiError::ssh)?;
-        let public = tmp
-            .public_key(b"tmp")
-            .ok_or_else(|| FfiError::ssh("no public key"))?
-            .to_openssh()
-            .map_err(FfiError::ssh)?;
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            item_id.as_bytes(),
-            ITEM_TYPE_SSH_KEY,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item(item_id.as_bytes(), ITEM_TYPE_SSH_KEY, normalized.as_bytes())
+            // validate and extract the public key via a temporary agent
+            let mut tmp = InMemoryAgent::new();
+            tmp.add_from_openssh(b"tmp".to_vec(), normalized.as_bytes())
+                .map_err(FfiError::ssh)?;
+            let public = tmp
+                .public_key(b"tmp")
+                .ok_or_else(|| FfiError::ssh("no public key"))?
+                .to_openssh()
+                .map_err(FfiError::ssh)?;
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
+                item_id.as_bytes(),
+                ITEM_TYPE_SSH_KEY,
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        // The key material was replaced under the same id → unload the previous private key from
-        // the agent (namespaced), otherwise connects in this session will keep signing
-        // with the OLD key (load_key_into_agent short-circuits on agent.contains).
-        state.agent.remove(&agent_key_id(&vault_id, &item_id));
-        Ok(public)
+            vault
+                .put_item(item_id.as_bytes(), ITEM_TYPE_SSH_KEY, normalized.as_bytes())
+                .map_err(FfiError::other)?;
+            // The key material was replaced under the same id → unload the previous private key from
+            // the agent (namespaced), otherwise connects in this session will keep signing
+            // with the OLD key (load_key_into_agent short-circuits on agent.contains).
+            state.agent.remove(&agent_key_id(&vault_id, &item_id));
+            Ok(public)
+        })
     }
 
     /// Attaches an OpenSSH user certificate to the key `key_item_id` (stored as
@@ -2535,29 +2535,29 @@ impl Core {
         // validate the certificate
         unissh_ssh_agent::ssh_key::Certificate::from_openssh(cert_openssh.trim())
             .map_err(|_| FfiError::ssh("invalid certificate"))?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let cert_id = cert_item_id(&key_item_id);
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            cert_id.as_bytes(),
-            ITEM_TYPE_SSH_CERT,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item(
+        self.with_state_mut(|state| {
+            let cert_id = cert_item_id(&key_item_id);
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
                 cert_id.as_bytes(),
                 ITEM_TYPE_SSH_CERT,
-                cert_openssh.as_bytes(),
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
             )
             .map_err(FfiError::other)?;
-        Ok(())
+            vault
+                .put_item(
+                    cert_id.as_bytes(),
+                    ITEM_TYPE_SSH_CERT,
+                    cert_openssh.as_bytes(),
+                )
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Returns the **public** key (OpenSSH) and its SHA256 fingerprint for
@@ -2568,38 +2568,38 @@ impl Core {
         vault_id: String,
         item_id: String,
     ) -> Result<PublicKeyInfo, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let item = {
-            let vault = Vault::open(
-                &state.storage,
-                &state.keyset,
-                &resolve_vid(&state.storage, &vault_id),
-            )
-            .map_err(FfiError::other)?;
-            vault
-                .get_item(item_id.as_bytes())
-                .map_err(FfiError::other)?
-                .ok_or(FfiError::NotFound)?
-        };
-        if item.item_type != ITEM_TYPE_SSH_KEY {
-            return Err(FfiError::other("item is not an SSH key"));
-        }
-        // Extract the public key via a temporary agent (the private key is in a Zeroizing
-        // DecryptedItem; the temporary agent is dropped on exit).
-        let mut tmp = InMemoryAgent::new();
-        tmp.add_from_item(b"x".to_vec(), &item)
-            .map_err(FfiError::ssh)?;
-        let pubkey = tmp
-            .public_key(b"x")
-            .ok_or_else(|| FfiError::ssh("no public key"))?;
-        let openssh = pubkey.to_openssh().map_err(FfiError::ssh)?;
-        let fingerprint = pubkey
-            .fingerprint(unissh_ssh_agent::ssh_key::HashAlg::Sha256)
-            .to_string();
-        Ok(PublicKeyInfo {
-            openssh,
-            fingerprint,
+        self.with_state_mut(|state| {
+            let item = {
+                let vault = Vault::open(
+                    &state.storage,
+                    &state.keyset,
+                    &resolve_vid(&state.storage, &vault_id),
+                )
+                .map_err(FfiError::other)?;
+                vault
+                    .get_item(item_id.as_bytes())
+                    .map_err(FfiError::other)?
+                    .ok_or(FfiError::NotFound)?
+            };
+            if item.item_type != ITEM_TYPE_SSH_KEY {
+                return Err(FfiError::other("item is not an SSH key"));
+            }
+            // Extract the public key via a temporary agent (the private key is in a Zeroizing
+            // DecryptedItem; the temporary agent is dropped on exit).
+            let mut tmp = InMemoryAgent::new();
+            tmp.add_from_item(b"x".to_vec(), &item)
+                .map_err(FfiError::ssh)?;
+            let pubkey = tmp
+                .public_key(b"x")
+                .ok_or_else(|| FfiError::ssh("no public key"))?;
+            let openssh = pubkey.to_openssh().map_err(FfiError::ssh)?;
+            let fingerprint = pubkey
+                .fingerprint(unissh_ssh_agent::ssh_key::HashAlg::Sha256)
+                .to_string();
+            Ok(PublicKeyInfo {
+                openssh,
+                fingerprint,
+            })
         })
     }
 
@@ -2609,23 +2609,23 @@ impl Core {
     /// the FFI boundary and is not zeroized — the UI is responsible for its fate (warn,
     /// don't log, write to a file, not to the shared clipboard by default).
     pub fn export_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let item = vault
-            .get_item(item_id.as_bytes())
-            .map_err(FfiError::other)?
-            .ok_or(FfiError::NotFound)?;
-        if item.item_type != ITEM_TYPE_SSH_KEY {
-            return Err(FfiError::other("item is not an SSH key"));
-        }
-        String::from_utf8(item.content.to_vec())
-            .map_err(|_| FfiError::other("key is not valid UTF-8"))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let item = vault
+                .get_item(item_id.as_bytes())
+                .map_err(FfiError::other)?
+                .ok_or(FfiError::NotFound)?;
+            if item.item_type != ITEM_TYPE_SSH_KEY {
+                return Err(FfiError::other("item is not an SSH key"));
+            }
+            String::from_utf8(item.content.to_vec())
+                .map_err(|_| FfiError::other("key is not valid UTF-8"))
+        })
     }
 
     /// Rotates an SSH key **on the same item id**: generates a new Ed25519 pair and
@@ -2635,51 +2635,51 @@ impl Core {
     /// installed on the servers). An attached certificate (if any) no longer matches
     /// the key after rotation — the UI should warn about reinstalling it.
     pub fn rotate_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        // The key must exist and be an SSH key — you can't "rotate" nothing.
-        let existing = vault
-            .get_item(item_id.as_bytes())
-            .map_err(FfiError::other)?
-            .ok_or(FfiError::NotFound)?;
-        if existing.item_type != ITEM_TYPE_SSH_KEY {
-            return Err(FfiError::other("item is not an SSH key"));
-        }
-        let (private_pem, public) = generate_ed25519_openssh().map_err(FfiError::ssh)?;
-        vault
-            .put_item(
-                item_id.as_bytes(),
-                ITEM_TYPE_SSH_KEY,
-                private_pem.as_bytes(),
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
             )
             .map_err(FfiError::other)?;
-        // The attached certificate no longer matches the new pair — remove it,
-        // otherwise `load_key_into_agent` would re-attach the mismatched cert on the
-        // next connect and cert authentication would silently break.
-        let cert = cert_item_id(&item_id);
-        if vault
-            .get_item(cert.as_bytes())
-            .map_err(FfiError::other)?
-            .is_some()
-        {
+            // The key must exist and be an SSH key — you can't "rotate" nothing.
+            let existing = vault
+                .get_item(item_id.as_bytes())
+                .map_err(FfiError::other)?
+                .ok_or(FfiError::NotFound)?;
+            if existing.item_type != ITEM_TYPE_SSH_KEY {
+                return Err(FfiError::other("item is not an SSH key"));
+            }
+            let (private_pem, public) = generate_ed25519_openssh().map_err(FfiError::ssh)?;
             vault
-                .delete_item(cert.as_bytes())
+                .put_item(
+                    item_id.as_bytes(),
+                    ITEM_TYPE_SSH_KEY,
+                    private_pem.as_bytes(),
+                )
                 .map_err(FfiError::other)?;
-        }
-        // Unload the old key from the in-memory agent (like delete_item/rename_item),
-        // otherwise connects in this session would keep using the previous pair, since
-        // `load_key_into_agent` short-circuits on `agent.contains()`.
-        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
-        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
-        // a revoked/rotated private key stays alive in the agent until the end of the session.
-        state.agent.remove(&agent_key_id(&vault_id, &item_id));
-        Ok(public)
+            // The attached certificate no longer matches the new pair — remove it,
+            // otherwise `load_key_into_agent` would re-attach the mismatched cert on the
+            // next connect and cert authentication would silently break.
+            let cert = cert_item_id(&item_id);
+            if vault
+                .get_item(cert.as_bytes())
+                .map_err(FfiError::other)?
+                .is_some()
+            {
+                vault
+                    .delete_item(cert.as_bytes())
+                    .map_err(FfiError::other)?;
+            }
+            // Unload the old key from the in-memory agent (like delete_item/rename_item),
+            // otherwise connects in this session would keep using the previous pair, since
+            // `load_key_into_agent` short-circuits on `agent.contains()`.
+            // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+            // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+            // a revoked/rotated private key stays alive in the agent until the end of the session.
+            state.agent.remove(&agent_key_id(&vault_id, &item_id));
+            Ok(public)
+        })
     }
 
     /// Renames (moves) an item to a new id. Transfers the attached
@@ -2690,66 +2690,66 @@ impl Core {
         item_id: String,
         new_item_id: String,
     ) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .rename_item(item_id.as_bytes(), new_item_id.as_bytes())
-            .map_err(map_vault_err)?;
-        // Transfer the certificate if it was attached to the old id.
-        let old_cert = cert_item_id(&item_id);
-        if vault
-            .get_item(old_cert.as_bytes())
-            .map_err(FfiError::other)?
-            .is_some()
-        {
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
             vault
-                .rename_item(old_cert.as_bytes(), cert_item_id(&new_item_id).as_bytes())
+                .rename_item(item_id.as_bytes(), new_item_id.as_bytes())
                 .map_err(map_vault_err)?;
-        }
-        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
-        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
-        // a revoked/rotated private key stays alive in the agent until the end of the session.
-        state.agent.remove(&agent_key_id(&vault_id, &item_id));
-        Ok(())
+            // Transfer the certificate if it was attached to the old id.
+            let old_cert = cert_item_id(&item_id);
+            if vault
+                .get_item(old_cert.as_bytes())
+                .map_err(FfiError::other)?
+                .is_some()
+            {
+                vault
+                    .rename_item(old_cert.as_bytes(), cert_item_id(&new_item_id).as_bytes())
+                    .map_err(map_vault_err)?;
+            }
+            // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+            // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+            // a revoked/rotated private key stays alive in the agent until the end of the session.
+            state.agent.remove(&agent_key_id(&vault_id, &item_id));
+            Ok(())
+        })
     }
 
     /// List of a vault's items.
     pub fn list_items(&self, vault_id: String) -> Result<Vec<ItemInfo>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let metas = vault.list_items().map_err(FfiError::other)?;
-        // The set of all ids — to cheaply (without decryption) determine whether a
-        // key has an attached certificate (`<key>.cert`).
-        let ids: std::collections::HashSet<&[u8]> =
-            metas.iter().map(|m| m.item_id.as_slice()).collect();
-        Ok(metas
-            .iter()
-            .map(|m| {
-                let item_id = String::from_utf8_lossy(&m.item_id).to_string();
-                let has_certificate = m.item_type == ITEM_TYPE_SSH_KEY
-                    && ids.contains(cert_item_id(&item_id).as_bytes());
-                ItemInfo {
-                    item_id,
-                    item_type: m.item_type,
-                    version: m.version,
-                    created_at: m.created_at,
-                    updated_at: m.updated_at,
-                    has_certificate,
-                }
-            })
-            .collect())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let metas = vault.list_items().map_err(FfiError::other)?;
+            // The set of all ids — to cheaply (without decryption) determine whether a
+            // key has an attached certificate (`<key>.cert`).
+            let ids: std::collections::HashSet<&[u8]> =
+                metas.iter().map(|m| m.item_id.as_slice()).collect();
+            Ok(metas
+                .iter()
+                .map(|m| {
+                    let item_id = String::from_utf8_lossy(&m.item_id).to_string();
+                    let has_certificate = m.item_type == ITEM_TYPE_SSH_KEY
+                        && ids.contains(cert_item_id(&item_id).as_bytes());
+                    ItemInfo {
+                        item_id,
+                        item_type: m.item_type,
+                        version: m.version,
+                        created_at: m.created_at,
+                        updated_at: m.updated_at,
+                        has_certificate,
+                    }
+                })
+                .collect())
+        })
     }
 
     /// Connects over SSH (optionally through a ProxyJump chain) and runs
@@ -3225,94 +3225,95 @@ impl Core {
         if group.parent_id.as_deref() == Some(group.group_id.as_str()) {
             return Err(FfiError::other("a group cannot be its own parent"));
         }
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            group.group_id.as_bytes(),
-            ITEM_TYPE_GROUP,
-        )?;
-        let stored = StoredGroup {
-            label: group.label,
-            member_ids: group.member_ids,
-            parent_id: group.parent_id,
-            color: None,
-        };
-        let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .put_item(group.group_id.as_bytes(), ITEM_TYPE_GROUP, &json)
+        self.with_state_mut(|state| {
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
+                group.group_id.as_bytes(),
+                ITEM_TYPE_GROUP,
+            )?;
+            let stored = StoredGroup {
+                label: group.label,
+                member_ids: group.member_ids,
+                parent_id: group.parent_id,
+                color: None,
+            };
+            let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        Ok(())
+            vault
+                .put_item(group.group_id.as_bytes(), ITEM_TYPE_GROUP, &json)
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// List of a vault's groups (broken JSON is skipped, tombstones are not visible).
     pub fn list_groups(&self, vault_id: String) -> Result<Vec<ServerGroup>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let mut out = Vec::new();
-        for m in vault.list_items().map_err(FfiError::other)? {
-            if m.item_type != ITEM_TYPE_GROUP {
-                continue;
-            }
-            if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
-                if let Ok(stored) = serde_json::from_slice::<StoredGroup>(&item.content) {
-                    out.push(group_to_public(
-                        String::from_utf8_lossy(&m.item_id).to_string(),
-                        stored,
-                    ));
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let mut out = Vec::new();
+            for m in vault.list_items().map_err(FfiError::other)? {
+                if m.item_type != ITEM_TYPE_GROUP {
+                    continue;
+                }
+                if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
+                    if let Ok(stored) = serde_json::from_slice::<StoredGroup>(&item.content) {
+                        out.push(group_to_public(
+                            String::from_utf8_lossy(&m.item_id).to_string(),
+                            stored,
+                        ));
+                    }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Returns a single group.
     pub fn get_group(&self, vault_id: String, group_id: String) -> Result<ServerGroup, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let item = vault
-            .get_item(group_id.as_bytes())
-            .map_err(FfiError::other)?
-            .filter(|i| i.item_type == ITEM_TYPE_GROUP)
-            .ok_or(FfiError::NotFound)?;
-        let stored: StoredGroup = serde_json::from_slice(&item.content).map_err(FfiError::other)?;
-        Ok(group_to_public(group_id, stored))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let item = vault
+                .get_item(group_id.as_bytes())
+                .map_err(FfiError::other)?
+                .filter(|i| i.item_type == ITEM_TYPE_GROUP)
+                .ok_or(FfiError::NotFound)?;
+            let stored: StoredGroup =
+                serde_json::from_slice(&item.content).map_err(FfiError::other)?;
+            Ok(group_to_public(group_id, stored))
+        })
     }
 
     /// Deletes a group (tombstone). Dangling `parent_id`/`member_id` references to it
     /// in other groups remain and are ignored during resolution.
     pub fn delete_group(&self, vault_id: String, group_id: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .delete_item(group_id.as_bytes())
-            .map_err(map_vault_err)?;
-        Ok(())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            vault
+                .delete_item(group_id.as_bytes())
+                .map_err(map_vault_err)?;
+            Ok(())
+        })
     }
 
     /// A dry run: expands the group (recursively, with cycle protection) into
@@ -3374,56 +3375,56 @@ impl Core {
         &self,
         vault_id: String,
     ) -> Result<VaultIntegrityReport, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let report = vault.verify_chain().map_err(FfiError::other)?;
-        Ok(integrity_report_to_ffi(report))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let report = vault.verify_chain().map_err(FfiError::other)?;
+            Ok(integrity_report_to_ffi(report))
+        })
     }
 
     /// Structural check of the instance DB: `integrity_check` + orphans + domain
     /// invariants. Read-only, a report with no secrets.
     pub fn check_consistency(&self) -> Result<DbConsistencyReport, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let report = state.storage.check_consistency().map_err(FfiError::other)?;
-        Ok(DbConsistencyReport {
-            ok: report.ok,
-            integrity_ok: report.integrity_ok,
-            issues: report
-                .issues
-                .into_iter()
-                .map(|i| DbConsistencyIssue {
-                    kind: match i.kind {
-                        unissh_storage::ConsistencyKind::OrphanItem => {
-                            DbConsistencyKind::OrphanItem
-                        }
-                        unissh_storage::ConsistencyKind::BadVersion => {
-                            DbConsistencyKind::BadVersion
-                        }
-                        unissh_storage::ConsistencyKind::BadAuthorLen => {
-                            DbConsistencyKind::BadAuthorLen
-                        }
-                        unissh_storage::ConsistencyKind::BadSignatureLen => {
-                            DbConsistencyKind::BadSignatureLen
-                        }
-                        unissh_storage::ConsistencyKind::TombstoneNotEmpty => {
-                            DbConsistencyKind::TombstoneNotEmpty
-                        }
-                        unissh_storage::ConsistencyKind::StaleHistory => {
-                            DbConsistencyKind::StaleHistory
-                        }
-                    },
-                    vault_id_hex: i.vault_id_hex,
-                    item_id_hex: i.item_id_hex,
-                    detail: i.detail,
-                })
-                .collect(),
+        self.with_state_mut(|state| {
+            let report = state.storage.check_consistency().map_err(FfiError::other)?;
+            Ok(DbConsistencyReport {
+                ok: report.ok,
+                integrity_ok: report.integrity_ok,
+                issues: report
+                    .issues
+                    .into_iter()
+                    .map(|i| DbConsistencyIssue {
+                        kind: match i.kind {
+                            unissh_storage::ConsistencyKind::OrphanItem => {
+                                DbConsistencyKind::OrphanItem
+                            }
+                            unissh_storage::ConsistencyKind::BadVersion => {
+                                DbConsistencyKind::BadVersion
+                            }
+                            unissh_storage::ConsistencyKind::BadAuthorLen => {
+                                DbConsistencyKind::BadAuthorLen
+                            }
+                            unissh_storage::ConsistencyKind::BadSignatureLen => {
+                                DbConsistencyKind::BadSignatureLen
+                            }
+                            unissh_storage::ConsistencyKind::TombstoneNotEmpty => {
+                                DbConsistencyKind::TombstoneNotEmpty
+                            }
+                            unissh_storage::ConsistencyKind::StaleHistory => {
+                                DbConsistencyKind::StaleHistory
+                            }
+                        },
+                        vault_id_hex: i.vault_id_hex,
+                        item_id_hex: i.item_id_hex,
+                        detail: i.detail,
+                    })
+                    .collect(),
+            })
         })
     }
 
@@ -3569,108 +3570,108 @@ impl Core {
         vault_id: String,
         profile: ConnectionProfile,
     ) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let ConnectionProfile {
-            profile_id,
-            uid,
-            label,
-            host,
-            port,
-            user,
-            auth,
-            username_template,
-            jumps,
-            tags,
-        } = profile;
-        if profile_id.is_empty() {
-            return Err(FfiError::other("profile_id must not be empty"));
-        }
-        // Empty uid = creating a new profile → mint an immutable id. A non-empty one
-        // (an edit: the UI returned the uid from get_connection) is kept as-is — the uid does not
-        // change when host/label change.
-        let uid = if uid.is_empty() {
-            mint_profile_uid()
-        } else {
-            uid
-        };
-        let (key_item_id, password_item_id, personal) = match auth {
-            ProfileAuth::Key { key_item_id } => (Some(key_item_id), None, false),
-            ProfileAuth::VaultPassword { password_item_id } => {
-                (None, Some(password_item_id), false)
+        self.with_state_mut(|state| {
+            let ConnectionProfile {
+                profile_id,
+                uid,
+                label,
+                host,
+                port,
+                user,
+                auth,
+                username_template,
+                jumps,
+                tags,
+            } = profile;
+            if profile_id.is_empty() {
+                return Err(FfiError::other("profile_id must not be empty"));
             }
-            ProfileAuth::PromptPassword => (None, None, false),
-            ProfileAuth::Personal => (None, None, true),
-        };
-        let mut stored = StoredProfile {
-            uid: Some(uid),
-            label,
-            host,
-            port,
-            user,
-            key_item_id,
-            password_item_id,
-            personal,
-            username_template,
-            jumps: jumps
-                .into_iter()
-                .map(jump_to_stored)
-                .collect::<Result<_, _>>()?,
-            tags,
-            extra: BTreeMap::new(),
-        };
-        ensure_item_type(
-            &state.storage,
-            &vault_id,
-            profile_id.as_bytes(),
-            ITEM_TYPE_CONNECTION,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        // Forward-compat: carry over the unknown fields of the existing profile.
-        stored.extra = preserved_extra::<StoredProfile>(
-            &vault,
-            profile_id.as_bytes(),
-            ITEM_TYPE_CONNECTION,
-            |sp| sp.extra,
-        );
-        let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
-        vault
-            .put_item(profile_id.as_bytes(), ITEM_TYPE_CONNECTION, &json)
+            // Empty uid = creating a new profile → mint an immutable id. A non-empty one
+            // (an edit: the UI returned the uid from get_connection) is kept as-is — the uid does not
+            // change when host/label change.
+            let uid = if uid.is_empty() {
+                mint_profile_uid()
+            } else {
+                uid
+            };
+            let (key_item_id, password_item_id, personal) = match auth {
+                ProfileAuth::Key { key_item_id } => (Some(key_item_id), None, false),
+                ProfileAuth::VaultPassword { password_item_id } => {
+                    (None, Some(password_item_id), false)
+                }
+                ProfileAuth::PromptPassword => (None, None, false),
+                ProfileAuth::Personal => (None, None, true),
+            };
+            let mut stored = StoredProfile {
+                uid: Some(uid),
+                label,
+                host,
+                port,
+                user,
+                key_item_id,
+                password_item_id,
+                personal,
+                username_template,
+                jumps: jumps
+                    .into_iter()
+                    .map(jump_to_stored)
+                    .collect::<Result<_, _>>()?,
+                tags,
+                extra: BTreeMap::new(),
+            };
+            ensure_item_type(
+                &state.storage,
+                &vault_id,
+                profile_id.as_bytes(),
+                ITEM_TYPE_CONNECTION,
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
             .map_err(FfiError::other)?;
-        Ok(())
+            // Forward-compat: carry over the unknown fields of the existing profile.
+            stored.extra = preserved_extra::<StoredProfile>(
+                &vault,
+                profile_id.as_bytes(),
+                ITEM_TYPE_CONNECTION,
+                |sp| sp.extra,
+            );
+            let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
+            vault
+                .put_item(profile_id.as_bytes(), ITEM_TYPE_CONNECTION, &json)
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// List of connection profiles in a vault.
     pub fn list_connections(&self, vault_id: String) -> Result<Vec<ConnectionProfile>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let mut out = Vec::new();
-        for m in vault.list_items().map_err(FfiError::other)? {
-            if m.item_type != ITEM_TYPE_CONNECTION {
-                continue;
-            }
-            if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
-                if let Ok(stored) = serde_json::from_slice::<StoredProfile>(&item.content) {
-                    out.push(stored_to_profile(
-                        &vault_id,
-                        String::from_utf8_lossy(&m.item_id).to_string(),
-                        stored,
-                    ));
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let mut out = Vec::new();
+            for m in vault.list_items().map_err(FfiError::other)? {
+                if m.item_type != ITEM_TYPE_CONNECTION {
+                    continue;
+                }
+                if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
+                    if let Ok(stored) = serde_json::from_slice::<StoredProfile>(&item.content) {
+                        out.push(stored_to_profile(
+                            &vault_id,
+                            String::from_utf8_lossy(&m.item_id).to_string(),
+                            stored,
+                        ));
+                    }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Returns a single connection profile.
@@ -3679,38 +3680,38 @@ impl Core {
         vault_id: String,
         profile_id: String,
     ) -> Result<ConnectionProfile, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let item = vault
-            .get_item(profile_id.as_bytes())
-            .map_err(FfiError::other)?
-            .filter(|i| i.item_type == ITEM_TYPE_CONNECTION)
-            .ok_or(FfiError::NotFound)?;
-        let stored: StoredProfile =
-            serde_json::from_slice(&item.content).map_err(FfiError::other)?;
-        Ok(stored_to_profile(&vault_id, profile_id, stored))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let item = vault
+                .get_item(profile_id.as_bytes())
+                .map_err(FfiError::other)?
+                .filter(|i| i.item_type == ITEM_TYPE_CONNECTION)
+                .ok_or(FfiError::NotFound)?;
+            let stored: StoredProfile =
+                serde_json::from_slice(&item.content).map_err(FfiError::other)?;
+            Ok(stored_to_profile(&vault_id, profile_id, stored))
+        })
     }
 
     /// Deletes a connection profile.
     pub fn delete_connection(&self, vault_id: String, profile_id: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .delete_item(profile_id.as_bytes())
-            .map_err(map_vault_err)?;
-        Ok(())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            vault
+                .delete_item(profile_id.as_bytes())
+                .map_err(map_vault_err)?;
+            Ok(())
+        })
     }
 
     // ---------- identities (personal SSH creds) ----------
@@ -3719,8 +3720,7 @@ impl Core {
     /// only `StoredIdentity` is written (username + references to a key/password item),
     /// the secret itself is not embedded. `identity_id` is the item_id in the vault.
     pub fn save_identity(&self, vault_id: String, identity: Identity) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
+        self.with_state_mut(|state| {
         let Identity {
             identity_id,
             label,
@@ -3782,6 +3782,7 @@ impl Core {
             .put_item(identity_id.as_bytes(), ITEM_TYPE_IDENTITY, &json)
             .map_err(FfiError::other)?;
         Ok(())
+        })
     }
 
     /// Returns a single identity by id.
@@ -3790,62 +3791,64 @@ impl Core {
         vault_id: String,
         identity_id: String,
     ) -> Result<Identity, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let item = vault
-            .get_item(identity_id.as_bytes())
-            .map_err(FfiError::other)?
-            .filter(|i| i.item_type == ITEM_TYPE_IDENTITY)
-            .ok_or(FfiError::NotFound)?;
-        let stored: StoredIdentity =
-            serde_json::from_slice(&item.content).map_err(FfiError::other)?;
-        Ok(stored.into_identity(identity_id))
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let item = vault
+                .get_item(identity_id.as_bytes())
+                .map_err(FfiError::other)?
+                .filter(|i| i.item_type == ITEM_TYPE_IDENTITY)
+                .ok_or(FfiError::NotFound)?;
+            let stored: StoredIdentity =
+                serde_json::from_slice(&item.content).map_err(FfiError::other)?;
+            Ok(stored.into_identity(identity_id))
+        })
     }
 
     /// List of personal identities in a vault.
     pub fn list_identities(&self, vault_id: String) -> Result<Vec<Identity>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let mut out = Vec::new();
-        for m in vault.list_items().map_err(FfiError::other)? {
-            if m.item_type != ITEM_TYPE_IDENTITY {
-                continue;
-            }
-            if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
-                if let Ok(stored) = serde_json::from_slice::<StoredIdentity>(&item.content) {
-                    out.push(stored.into_identity(String::from_utf8_lossy(&m.item_id).to_string()));
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let mut out = Vec::new();
+            for m in vault.list_items().map_err(FfiError::other)? {
+                if m.item_type != ITEM_TYPE_IDENTITY {
+                    continue;
+                }
+                if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
+                    if let Ok(stored) = serde_json::from_slice::<StoredIdentity>(&item.content) {
+                        out.push(
+                            stored.into_identity(String::from_utf8_lossy(&m.item_id).to_string()),
+                        );
+                    }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Deletes a personal identity.
     pub fn delete_identity(&self, vault_id: String, identity_id: String) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .delete_item(identity_id.as_bytes())
-            .map_err(map_vault_err)?;
-        Ok(())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
+            vault
+                .delete_item(identity_id.as_bytes())
+                .map_err(map_vault_err)?;
+            Ok(())
+        })
     }
 
     // ---------- identity bindings (personal vault ↔ shared host) ----------
@@ -3866,66 +3869,68 @@ impl Core {
         binding: IdentityBinding,
         allow_rebind: bool,
     ) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let IdentityBinding {
-            team_vault_id,
-            profile_uid,
-            identity_item_id,
-            destination_pin,
-        } = binding;
-        if team_vault_id.is_empty() || profile_uid.is_empty() {
-            return Err(FfiError::other(
-                "binding requires non-empty team_vault_id and profile_uid",
-            ));
-        }
-        let item_id = binding_item_id(&team_vault_id, &profile_uid);
-        ensure_item_type(
-            &state.storage,
-            &personal_vault_id,
-            item_id.as_bytes(),
-            ITEM_TYPE_BINDING,
-        )?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &personal_vault_id),
-        )
-        .map_err(FfiError::other)?;
-        // First-bind guard: we do not silently rebind to a changed destination.
-        if !allow_rebind {
-            if let Some(existing) = vault
-                .get_item(item_id.as_bytes())
-                .map_err(FfiError::other)?
-                .filter(|i| i.item_type == ITEM_TYPE_BINDING)
-                .and_then(|i| serde_json::from_slice::<StoredBinding>(&i.content).ok())
-            {
-                if existing.destination_pin != destination_pin {
-                    return Err(FfiError::other(format!(
-                        "binding already pinned to {}; re-bind to {} requires \
+        self.with_state_mut(|state| {
+            let IdentityBinding {
+                team_vault_id,
+                profile_uid,
+                identity_item_id,
+                destination_pin,
+            } = binding;
+            if team_vault_id.is_empty() || profile_uid.is_empty() {
+                return Err(FfiError::other(
+                    "binding requires non-empty team_vault_id and profile_uid",
+                ));
+            }
+            let item_id = binding_item_id(&team_vault_id, &profile_uid);
+            ensure_item_type(
+                &state.storage,
+                &personal_vault_id,
+                item_id.as_bytes(),
+                ITEM_TYPE_BINDING,
+            )?;
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &personal_vault_id),
+            )
+            .map_err(FfiError::other)?;
+            // First-bind guard: we do not silently rebind to a changed destination.
+            if !allow_rebind {
+                if let Some(existing) = vault
+                    .get_item(item_id.as_bytes())
+                    .map_err(FfiError::other)?
+                    .filter(|i| i.item_type == ITEM_TYPE_BINDING)
+                    .and_then(|i| serde_json::from_slice::<StoredBinding>(&i.content).ok())
+                {
+                    if existing.destination_pin != destination_pin {
+                        return Err(FfiError::other(format!(
+                            "binding already pinned to {}; re-bind to {} requires \
                          explicit confirmation (allow_rebind)",
-                        existing.destination_pin, destination_pin
-                    )));
+                            existing.destination_pin, destination_pin
+                        )));
+                    }
                 }
             }
-        }
-        let mut stored = StoredBinding {
-            team_vault_id,
-            profile_uid,
-            identity_item_id,
-            destination_pin,
-            extra: BTreeMap::new(),
-        };
-        // Forward-compat: carry over the unknown fields of the existing binding.
-        stored.extra =
-            preserved_extra::<StoredBinding>(&vault, item_id.as_bytes(), ITEM_TYPE_BINDING, |sb| {
-                sb.extra
-            });
-        let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
-        vault
-            .put_item(item_id.as_bytes(), ITEM_TYPE_BINDING, &json)
-            .map_err(FfiError::other)?;
-        Ok(())
+            let mut stored = StoredBinding {
+                team_vault_id,
+                profile_uid,
+                identity_item_id,
+                destination_pin,
+                extra: BTreeMap::new(),
+            };
+            // Forward-compat: carry over the unknown fields of the existing binding.
+            stored.extra = preserved_extra::<StoredBinding>(
+                &vault,
+                item_id.as_bytes(),
+                ITEM_TYPE_BINDING,
+                |sb| sb.extra,
+            );
+            let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
+            vault
+                .put_item(item_id.as_bytes(), ITEM_TYPE_BINDING, &json)
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Returns the binding for (team_vault_id, profile_uid), if any.
@@ -3935,25 +3940,25 @@ impl Core {
         team_vault_id: String,
         profile_uid: String,
     ) -> Result<Option<IdentityBinding>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let item_id = binding_item_id(&team_vault_id, &profile_uid);
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &personal_vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let Some(item) = vault
-            .get_item(item_id.as_bytes())
-            .map_err(FfiError::other)?
-            .filter(|i| i.item_type == ITEM_TYPE_BINDING)
-        else {
-            return Ok(None);
-        };
-        let stored: StoredBinding =
-            serde_json::from_slice(&item.content).map_err(FfiError::other)?;
-        Ok(Some(stored.into_binding()))
+        self.with_state_mut(|state| {
+            let item_id = binding_item_id(&team_vault_id, &profile_uid);
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &personal_vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let Some(item) = vault
+                .get_item(item_id.as_bytes())
+                .map_err(FfiError::other)?
+                .filter(|i| i.item_type == ITEM_TYPE_BINDING)
+            else {
+                return Ok(None);
+            };
+            let stored: StoredBinding =
+                serde_json::from_slice(&item.content).map_err(FfiError::other)?;
+            Ok(Some(stored.into_binding()))
+        })
     }
 
     /// List of all bindings in the personal vault.
@@ -3961,26 +3966,26 @@ impl Core {
         &self,
         personal_vault_id: String,
     ) -> Result<Vec<IdentityBinding>, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &personal_vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let mut out = Vec::new();
-        for m in vault.list_items().map_err(FfiError::other)? {
-            if m.item_type != ITEM_TYPE_BINDING {
-                continue;
-            }
-            if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
-                if let Ok(stored) = serde_json::from_slice::<StoredBinding>(&item.content) {
-                    out.push(stored.into_binding());
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &personal_vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let mut out = Vec::new();
+            for m in vault.list_items().map_err(FfiError::other)? {
+                if m.item_type != ITEM_TYPE_BINDING {
+                    continue;
+                }
+                if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
+                    if let Ok(stored) = serde_json::from_slice::<StoredBinding>(&item.content) {
+                        out.push(stored.into_binding());
+                    }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Deletes the binding for (team_vault_id, profile_uid).
@@ -3990,19 +3995,19 @@ impl Core {
         team_vault_id: String,
         profile_uid: String,
     ) -> Result<(), FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let item_id = binding_item_id(&team_vault_id, &profile_uid);
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &personal_vault_id),
-        )
-        .map_err(FfiError::other)?;
-        vault
-            .delete_item(item_id.as_bytes())
-            .map_err(map_vault_err)?;
-        Ok(())
+        self.with_state_mut(|state| {
+            let item_id = binding_item_id(&team_vault_id, &profile_uid);
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &personal_vault_id),
+            )
+            .map_err(FfiError::other)?;
+            vault
+                .delete_item(item_id.as_bytes())
+                .map_err(map_vault_err)?;
+            Ok(())
+        })
     }
 
     /// Resolves a binding for connecting to a shared host with an anti-redirect check:
@@ -4035,23 +4040,23 @@ impl Core {
         profile_uid: &str,
     ) -> Result<Option<String>, FfiError> {
         let item_id = binding_item_id(team_vault_id, profile_uid);
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        for rec in state.storage.list_vaults().map_err(FfiError::other)? {
-            if let Some(item) = state
-                .storage
-                .get_item(&rec.vault_id, item_id.as_bytes())
-                .map_err(FfiError::other)?
-            {
-                if item.item_type == ITEM_TYPE_BINDING && !item.tombstone {
-                    return Ok(Some(match rec.sync_target {
-                        SyncTarget::Cloud => hex::encode(&rec.vault_id),
-                        _ => String::from_utf8_lossy(&rec.vault_id).to_string(),
-                    }));
+        self.with_state(|state| {
+            for rec in state.storage.list_vaults().map_err(FfiError::other)? {
+                if let Some(item) = state
+                    .storage
+                    .get_item(&rec.vault_id, item_id.as_bytes())
+                    .map_err(FfiError::other)?
+                {
+                    if item.item_type == ITEM_TYPE_BINDING && !item.tombstone {
+                        return Ok(Some(match rec.sync_target {
+                            SyncTarget::Cloud => hex::encode(&rec.vault_id),
+                            _ => String::from_utf8_lossy(&rec.vault_id).to_string(),
+                        }));
+                    }
                 }
             }
-        }
-        Ok(None)
+            Ok(None)
+        })
     }
 
     /// Resolves Personal authentication for connecting to a shared host (B4):
@@ -4159,61 +4164,61 @@ impl Core {
         config_text: String,
     ) -> Result<Vec<String>, FfiError> {
         let cfg = SshConfig::parse(&config_text).map_err(FfiError::other)?;
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let mut created = Vec::new();
-        for alias in cfg.host_aliases() {
-            // Don't overwrite an existing item of another type (e.g. a key with the same id):
-            // we skip such an alias, not counting it among the created ones.
-            if ensure_item_type(
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
                 &state.storage,
-                &vault_id,
-                alias.as_bytes(),
-                ITEM_TYPE_CONNECTION,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
             )
-            .is_err()
-            {
-                continue;
+            .map_err(FfiError::other)?;
+            let mut created = Vec::new();
+            for alias in cfg.host_aliases() {
+                // Don't overwrite an existing item of another type (e.g. a key with the same id):
+                // we skip such an alias, not counting it among the created ones.
+                if ensure_item_type(
+                    &state.storage,
+                    &vault_id,
+                    alias.as_bytes(),
+                    ITEM_TYPE_CONNECTION,
+                )
+                .is_err()
+                {
+                    continue;
+                }
+                // #9: overwriting an existing profile MUST preserve its
+                // immutable uid — personal bindings and hop_refs depend on it
+                // (B2.1/B2.2); a fresh uid would orphan them. We reuse the existing
+                // profile's uid, otherwise we mint a new one.
+                let existing_uid = vault
+                    .get_item(alias.as_bytes())
+                    .ok()
+                    .flatten()
+                    .and_then(|it| serde_json::from_slice::<StoredProfile>(&it.content).ok())
+                    .and_then(|sp| sp.uid)
+                    .filter(|u| !u.is_empty());
+                let s = cfg.resolve(&alias);
+                let stored = StoredProfile {
+                    uid: Some(existing_uid.unwrap_or_else(mint_profile_uid)),
+                    label: alias.clone(),
+                    host: s.hostname.unwrap_or_else(|| alias.clone()),
+                    port: s.port.unwrap_or(22),
+                    user: s.user.unwrap_or_default(),
+                    key_item_id: None,
+                    password_item_id: None,
+                    personal: false,
+                    username_template: None,
+                    jumps: parse_proxy_jump(s.proxy_jump.as_deref()),
+                    tags: Vec::new(),
+                    extra: std::collections::BTreeMap::new(),
+                };
+                let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
+                vault
+                    .put_item(alias.as_bytes(), ITEM_TYPE_CONNECTION, &json)
+                    .map_err(FfiError::other)?;
+                created.push(alias);
             }
-            // #9: overwriting an existing profile MUST preserve its
-            // immutable uid — personal bindings and hop_refs depend on it
-            // (B2.1/B2.2); a fresh uid would orphan them. We reuse the existing
-            // profile's uid, otherwise we mint a new one.
-            let existing_uid = vault
-                .get_item(alias.as_bytes())
-                .ok()
-                .flatten()
-                .and_then(|it| serde_json::from_slice::<StoredProfile>(&it.content).ok())
-                .and_then(|sp| sp.uid)
-                .filter(|u| !u.is_empty());
-            let s = cfg.resolve(&alias);
-            let stored = StoredProfile {
-                uid: Some(existing_uid.unwrap_or_else(mint_profile_uid)),
-                label: alias.clone(),
-                host: s.hostname.unwrap_or_else(|| alias.clone()),
-                port: s.port.unwrap_or(22),
-                user: s.user.unwrap_or_default(),
-                key_item_id: None,
-                password_item_id: None,
-                personal: false,
-                username_template: None,
-                jumps: parse_proxy_jump(s.proxy_jump.as_deref()),
-                tags: Vec::new(),
-                extra: std::collections::BTreeMap::new(),
-            };
-            let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
-            vault
-                .put_item(alias.as_bytes(), ITEM_TYPE_CONNECTION, &json)
-                .map_err(FfiError::other)?;
-            created.push(alias);
-        }
-        Ok(created)
+            Ok(created)
+        })
     }
 
     /// Renders a vault's profiles into `~/.ssh/config` text (the inverse of
@@ -4264,67 +4269,68 @@ impl Core {
     /// `russh` as pinning during a live connect (a byte match). Hashed lines
     /// (`|1|…`) and invalid ones are skipped with a count.
     pub fn import_known_hosts(&self, text: String) -> Result<KnownHostsImport, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let mut imported = 0u32;
-        let mut skipped_hashed = 0u32;
-        let mut skipped_invalid = 0u32;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let mut tok = line.split_whitespace();
-            let (Some(hosts), Some(keytype), Some(keyblob)) = (tok.next(), tok.next(), tok.next())
-            else {
-                skipped_invalid += 1;
-                continue;
-            };
-            // @cert-authority / @revoked markers are not a normal pin — we skip them.
-            if hosts.starts_with('@') {
-                skipped_invalid += 1;
-                continue;
-            }
-            if hosts.contains('|') {
-                skipped_hashed += 1;
-                continue;
-            }
-            let key_bytes = match canonical_host_key(&format!("{keytype} {keyblob}")) {
-                Ok(b) => b,
-                Err(_) => {
+        self.with_state_mut(|state| {
+            let mut imported = 0u32;
+            let mut skipped_hashed = 0u32;
+            let mut skipped_invalid = 0u32;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let mut tok = line.split_whitespace();
+                let (Some(hosts), Some(keytype), Some(keyblob)) =
+                    (tok.next(), tok.next(), tok.next())
+                else {
+                    skipped_invalid += 1;
+                    continue;
+                };
+                // @cert-authority / @revoked markers are not a normal pin — we skip them.
+                if hosts.starts_with('@') {
                     skipped_invalid += 1;
                     continue;
                 }
-            };
-            let mut any = false;
-            for entry in hosts.split(',') {
-                let (host, port) = split_host_port(entry);
-                if host.is_empty() {
+                if hosts.contains('|') {
+                    skipped_hashed += 1;
                     continue;
                 }
-                // A glob/negation (`*`/`?`/`!`) does NOT match a point TOFU lookup —
-                // pinning such a token is pointless (a dead record that misleads
-                // with "the host is pinned"). We skip it (counted as skipped).
-                if host.contains(['*', '?', '!']) {
-                    continue;
+                let key_bytes = match canonical_host_key(&format!("{keytype} {keyblob}")) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        skipped_invalid += 1;
+                        continue;
+                    }
+                };
+                let mut any = false;
+                for entry in hosts.split(',') {
+                    let (host, port) = split_host_port(entry);
+                    if host.is_empty() {
+                        continue;
+                    }
+                    // A glob/negation (`*`/`?`/`!`) does NOT match a point TOFU lookup —
+                    // pinning such a token is pointless (a dead record that misleads
+                    // with "the host is pinned"). We skip it (counted as skipped).
+                    if host.contains(['*', '?', '!']) {
+                        continue;
+                    }
+                    if state
+                        .storage
+                        .put_known_host(&host, port, &key_bytes)
+                        .is_ok()
+                    {
+                        imported += 1;
+                        any = true;
+                    }
                 }
-                if state
-                    .storage
-                    .put_known_host(&host, port, &key_bytes)
-                    .is_ok()
-                {
-                    imported += 1;
-                    any = true;
+                if !any {
+                    skipped_invalid += 1;
                 }
             }
-            if !any {
-                skipped_invalid += 1;
-            }
-        }
-        Ok(KnownHostsImport {
-            imported,
-            skipped_hashed,
-            skipped_invalid,
+            Ok(KnownHostsImport {
+                imported,
+                skipped_hashed,
+                skipped_invalid,
+            })
         })
     }
 
@@ -4337,74 +4343,75 @@ impl Core {
         reg_text: String,
     ) -> Result<HostImportReport, FfiError> {
         let sessions = parse_putty_reg(&reg_text);
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vid = resolve_vid(&state.storage, &vault_id);
-        let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
-        let mut created_ids = Vec::new();
-        let mut skipped = 0u32;
-        for s in sessions {
-            let proto = if s.protocol.is_empty() {
-                "ssh"
-            } else {
-                s.protocol.as_str()
-            };
-            if proto != "ssh" || s.host.is_empty() || s.name.is_empty() {
-                skipped += 1;
-                continue;
-            }
-            // Any existing live item with this id (including a profile of the same
-            // type) is not overwritten; the import only creates new ones.
-            let occupied = state
-                .storage
-                .get_item(&vid, s.name.as_bytes())
-                .map_err(FfiError::other)?
-                .map(|r| !r.tombstone)
-                .unwrap_or(false);
-            if occupied {
-                skipped += 1;
-                continue;
-            }
-            let jumps = if s.proxy_method == 6 && !s.proxy_host.is_empty() {
-                vec![StoredJump {
-                    host: s.proxy_host.clone(),
-                    port: if s.proxy_port == 0 {
-                        22
-                    } else {
-                        s.proxy_port as u16
-                    },
-                    user: s.proxy_user.clone(),
+        self.with_state_mut(|state| {
+            let vid = resolve_vid(&state.storage, &vault_id);
+            let vault =
+                Vault::open(&state.storage, &state.keyset, &vid).map_err(FfiError::other)?;
+            let mut created_ids = Vec::new();
+            let mut skipped = 0u32;
+            for s in sessions {
+                let proto = if s.protocol.is_empty() {
+                    "ssh"
+                } else {
+                    s.protocol.as_str()
+                };
+                if proto != "ssh" || s.host.is_empty() || s.name.is_empty() {
+                    skipped += 1;
+                    continue;
+                }
+                // Any existing live item with this id (including a profile of the same
+                // type) is not overwritten; the import only creates new ones.
+                let occupied = state
+                    .storage
+                    .get_item(&vid, s.name.as_bytes())
+                    .map_err(FfiError::other)?
+                    .map(|r| !r.tombstone)
+                    .unwrap_or(false);
+                if occupied {
+                    skipped += 1;
+                    continue;
+                }
+                let jumps = if s.proxy_method == 6 && !s.proxy_host.is_empty() {
+                    vec![StoredJump {
+                        host: s.proxy_host.clone(),
+                        port: if s.proxy_port == 0 {
+                            22
+                        } else {
+                            s.proxy_port as u16
+                        },
+                        user: s.proxy_user.clone(),
+                        key_item_id: None,
+                        password_item_id: None,
+                        extra: std::collections::BTreeMap::new(),
+                        hop_ref: None,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let stored = StoredProfile {
+                    uid: Some(mint_profile_uid()),
+                    label: s.name.clone(),
+                    host: s.host.clone(),
+                    port: if s.port == 0 { 22 } else { s.port as u16 },
+                    user: s.user.clone(),
                     key_item_id: None,
                     password_item_id: None,
+                    personal: false,
+                    username_template: None,
+                    jumps,
+                    tags: Vec::new(),
                     extra: std::collections::BTreeMap::new(),
-                    hop_ref: None,
-                }]
-            } else {
-                Vec::new()
-            };
-            let stored = StoredProfile {
-                uid: Some(mint_profile_uid()),
-                label: s.name.clone(),
-                host: s.host.clone(),
-                port: if s.port == 0 { 22 } else { s.port as u16 },
-                user: s.user.clone(),
-                key_item_id: None,
-                password_item_id: None,
-                personal: false,
-                username_template: None,
-                jumps,
-                tags: Vec::new(),
-                extra: std::collections::BTreeMap::new(),
-            };
-            let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
-            vault
-                .put_item(s.name.as_bytes(), ITEM_TYPE_CONNECTION, &json)
-                .map_err(FfiError::other)?;
-            created_ids.push(s.name);
-        }
-        Ok(HostImportReport {
-            created_ids,
-            skipped,
+                };
+                let json = serde_json::to_vec(&stored).map_err(FfiError::other)?;
+                vault
+                    .put_item(s.name.as_bytes(), ITEM_TYPE_CONNECTION, &json)
+                    .map_err(FfiError::other)?;
+                created_ids.push(s.name);
+            }
+            Ok(HostImportReport {
+                created_ids,
+                skipped,
+            })
         })
     }
 
@@ -4414,45 +4421,45 @@ impl Core {
     /// with this passphrase, without the source account's keyset.
     pub fn export_vault(&self, vault_id: String, passphrase: String) -> Result<Vec<u8>, FfiError> {
         let passphrase = Zeroizing::new(passphrase);
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, &vault_id),
-        )
-        .map_err(FfiError::other)?;
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, &vault_id),
+            )
+            .map_err(FfiError::other)?;
 
-        let mut items_buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-        let mut count = 0u32;
-        for m in vault.list_items().map_err(FfiError::other)? {
-            if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
-                put_len_bytes(&mut items_buf, &item.item_id);
-                items_buf.extend_from_slice(&item.item_type.to_be_bytes());
-                put_len_bytes(&mut items_buf, &item.content);
-                count += 1;
+            let mut items_buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+            let mut count = 0u32;
+            for m in vault.list_items().map_err(FfiError::other)? {
+                if let Some(item) = vault.get_item(&m.item_id).map_err(FfiError::other)? {
+                    put_len_bytes(&mut items_buf, &item.item_id);
+                    items_buf.extend_from_slice(&item.item_type.to_be_bytes());
+                    put_len_bytes(&mut items_buf, &item.content);
+                    count += 1;
+                }
             }
-        }
-        let mut bundle: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-        put_len_bytes(&mut bundle, vault.name());
-        bundle.extend_from_slice(&count.to_be_bytes());
-        bundle.extend_from_slice(&items_buf);
+            let mut bundle: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+            put_len_bytes(&mut bundle, vault.name());
+            bundle.extend_from_slice(&count.to_be_bytes());
+            bundle.extend_from_slice(&items_buf);
 
-        let params = KdfParams::recommended();
-        let key = derive_key(passphrase.as_bytes(), &params).map_err(FfiError::other)?;
-        let kdf_blob = params.to_blob().map_err(FfiError::other)?;
-        // The AAD covers magic+version+kdf_blob → tampering with the KDF params/header
-        // is detected on decryption (not just a change of vault_id).
-        let aad = backup_aad(vault_id.as_bytes(), &kdf_blob);
-        let ciphertext = aead_encrypt(&key, &bundle, &aad).map_err(FfiError::other)?;
+            let params = KdfParams::recommended();
+            let key = derive_key(passphrase.as_bytes(), &params).map_err(FfiError::other)?;
+            let kdf_blob = params.to_blob().map_err(FfiError::other)?;
+            // The AAD covers magic+version+kdf_blob → tampering with the KDF params/header
+            // is detected on decryption (not just a change of vault_id).
+            let aad = backup_aad(vault_id.as_bytes(), &kdf_blob);
+            let ciphertext = aead_encrypt(&key, &bundle, &aad).map_err(FfiError::other)?;
 
-        let mut out = Vec::new();
-        out.extend_from_slice(BACKUP_MAGIC);
-        out.push(BACKUP_VERSION);
-        put_len_bytes(&mut out, &kdf_blob);
-        put_len_bytes(&mut out, vault_id.as_bytes());
-        put_len_bytes(&mut out, &ciphertext);
-        Ok(out)
+            let mut out = Vec::new();
+            out.extend_from_slice(BACKUP_MAGIC);
+            out.push(BACKUP_VERSION);
+            put_len_bytes(&mut out, &kdf_blob);
+            put_len_bytes(&mut out, vault_id.as_bytes());
+            put_len_bytes(&mut out, &ciphertext);
+            Ok(out)
+        })
     }
 
     /// Imports a backup into a new vault `new_vault_id` of the current instance: decryption
@@ -4499,40 +4506,40 @@ impl Core {
             items.push((item_id, item_type, content));
         }
 
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        // Any existing volume-id (live OR tombstone) is taken: creating over it
-        // is not allowed (anti-rollback would reject it anyway), so we return a clear error.
-        if state
-            .storage
-            .get_vault(new_vault_id.as_bytes())
-            .map_err(FfiError::other)?
-            .is_some()
-        {
-            return Err(FfiError::AlreadyExists);
-        }
-        // Atomically: creating the vault + all items in a single transaction — a partial failure
-        // won't leave a half-imported vault.
-        state
-            .storage
-            .transaction(|| {
-                let vault = Vault::create(
-                    &state.storage,
-                    &state.keyset,
-                    new_vault_id.as_bytes().to_vec(),
-                    &name,
-                )?;
-                for (item_id, item_type, content) in &items {
-                    vault.put_item(item_id, *item_type, content)?;
-                }
-                Ok::<(), unissh_vault::VaultError>(())
-            })
-            .map_err(map_vault_err)?;
-        state.vault_names.insert(
-            new_vault_id.into_bytes(),
-            String::from_utf8_lossy(&name).to_string(),
-        );
-        Ok(())
+        self.with_state_mut(|state| {
+            // Any existing volume-id (live OR tombstone) is taken: creating over it
+            // is not allowed (anti-rollback would reject it anyway), so we return a clear error.
+            if state
+                .storage
+                .get_vault(new_vault_id.as_bytes())
+                .map_err(FfiError::other)?
+                .is_some()
+            {
+                return Err(FfiError::AlreadyExists);
+            }
+            // Atomically: creating the vault + all items in a single transaction — a partial failure
+            // won't leave a half-imported vault.
+            state
+                .storage
+                .transaction(|| {
+                    let vault = Vault::create(
+                        &state.storage,
+                        &state.keyset,
+                        new_vault_id.as_bytes().to_vec(),
+                        &name,
+                    )?;
+                    for (item_id, item_type, content) in &items {
+                        vault.put_item(item_id, *item_type, content)?;
+                    }
+                    Ok::<(), unissh_vault::VaultError>(())
+                })
+                .map_err(map_vault_err)?;
+            state.vault_names.insert(
+                new_vault_id.into_bytes(),
+                String::from_utf8_lossy(&name).to_string(),
+            );
+            Ok(())
+        })
     }
 }
 
@@ -4541,26 +4548,51 @@ impl Core {
     /// under the lock is ordinary, not invariant-bearing) so that a single panic does not
     /// "jam" the entire Core forever on calls through the FFI.
     fn locked_state(&self) -> std::sync::MutexGuard<'_, Option<CoreState>> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        lock_recover(&self.state)
+    }
+
+    /// Runs `f` with a shared reference to the unlocked state, or returns
+    /// [`FfiError::Locked`] if the instance is locked. Collapses the repeated
+    /// `let guard = self.locked_state(); let state = guard.as_ref().ok_or(Locked)?;`
+    /// prologue. The lock is held for exactly the duration of `f` (same scope as the
+    /// hand-written prologue — the guard drops when `f` returns).
+    fn with_state<R>(
+        &self,
+        f: impl FnOnce(&CoreState) -> Result<R, FfiError>,
+    ) -> Result<R, FfiError> {
+        let guard = self.locked_state();
+        let state = guard.as_ref().ok_or(FfiError::Locked)?;
+        f(state)
+    }
+
+    /// Mutable-state counterpart of [`Self::with_state`]. Same lock scope as the
+    /// hand-written `let mut guard = ...; let state = guard.as_mut().ok_or(Locked)?;`.
+    fn with_state_mut<R>(
+        &self,
+        f: impl FnOnce(&mut CoreState) -> Result<R, FfiError>,
+    ) -> Result<R, FfiError> {
+        let mut guard = self.locked_state();
+        let state = guard.as_mut().ok_or(FfiError::Locked)?;
+        f(state)
     }
 
     /// Reads + decrypts the current per-account state (A3.2), if any.
     fn read_account_state(&self) -> Result<Option<AccountStatePayload>, FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let author = state.keyset.signing.verifying.to_bytes().to_vec();
-        match state
-            .storage
-            .get_account_state(&author)
-            .map_err(FfiError::other)?
-        {
-            Some(row) => {
-                let plain =
-                    open_account_payload(&state.keyset, &row.payload).map_err(map_vault_err)?;
-                Ok(Some(AccountStatePayload::decode(&plain)?))
+        self.with_state(|state| {
+            let author = state.keyset.signing.verifying.to_bytes().to_vec();
+            match state
+                .storage
+                .get_account_state(&author)
+                .map_err(FfiError::other)?
+            {
+                Some(row) => {
+                    let plain =
+                        open_account_payload(&state.keyset, &row.payload).map_err(map_vault_err)?;
+                    Ok(Some(AccountStatePayload::decode(&plain)?))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
     }
 
     /// Read-modify-write of the per-account state (A3.2): decrypt the current (or
@@ -4570,31 +4602,32 @@ impl Core {
         &self,
         mutate: impl FnOnce(&mut AccountStatePayload),
     ) -> Result<(), FfiError> {
-        let guard = self.locked_state();
-        let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        let author = state.keyset.signing.verifying.to_bytes().to_vec();
-        let (mut payload, cur_version) = match state
-            .storage
-            .get_account_state(&author)
-            .map_err(FfiError::other)?
-        {
-            Some(row) => {
-                let plain =
-                    open_account_payload(&state.keyset, &row.payload).map_err(map_vault_err)?;
-                (AccountStatePayload::decode(&plain)?, row.version)
-            }
-            None => (AccountStatePayload::default(), 0),
-        };
-        mutate(&mut payload);
-        let sealed =
-            seal_account_payload(&state.keyset, &payload.encode()).map_err(map_vault_err)?;
-        let new_version = cur_version.saturating_add(1);
-        let sig = sign_account_state(&state.keyset, new_version, &sealed).map_err(map_vault_err)?;
-        state
-            .storage
-            .set_account_state(&author, new_version, &sealed, &sig)
-            .map_err(FfiError::other)?;
-        Ok(())
+        self.with_state(|state| {
+            let author = state.keyset.signing.verifying.to_bytes().to_vec();
+            let (mut payload, cur_version) = match state
+                .storage
+                .get_account_state(&author)
+                .map_err(FfiError::other)?
+            {
+                Some(row) => {
+                    let plain =
+                        open_account_payload(&state.keyset, &row.payload).map_err(map_vault_err)?;
+                    (AccountStatePayload::decode(&plain)?, row.version)
+                }
+                None => (AccountStatePayload::default(), 0),
+            };
+            mutate(&mut payload);
+            let sealed =
+                seal_account_payload(&state.keyset, &payload.encode()).map_err(map_vault_err)?;
+            let new_version = cur_version.saturating_add(1);
+            let sig =
+                sign_account_state(&state.keyset, new_version, &sealed).map_err(map_vault_err)?;
+            state
+                .storage
+                .set_account_state(&author, new_version, &sealed, &sig)
+                .map_err(FfiError::other)?;
+            Ok(())
+        })
     }
 
     /// Connect + authentication under the Core lock (agent+storage are needed: keys are loaded
@@ -4621,24 +4654,24 @@ impl Core {
         expected_type: u32,
         what: &str,
     ) -> Result<String, FfiError> {
-        let mut guard = self.locked_state();
-        let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        let vault = Vault::open(
-            &state.storage,
-            &state.keyset,
-            &resolve_vid(&state.storage, vault_id),
-        )
-        .map_err(FfiError::other)?;
-        let item = vault
-            .get_item_version(item_id.as_bytes(), version)
-            .map_err(FfiError::other)?
-            .ok_or(FfiError::NotFound)?;
-        if item.item_type != expected_type {
-            return Err(FfiError::other(format!("item is not {what}")));
-        }
-        let s = std::str::from_utf8(&item.content)
-            .map_err(|_| FfiError::other(format!("{what} is not valid UTF-8")))?;
-        Ok(s.to_string())
+        self.with_state_mut(|state| {
+            let vault = Vault::open(
+                &state.storage,
+                &state.keyset,
+                &resolve_vid(&state.storage, vault_id),
+            )
+            .map_err(FfiError::other)?;
+            let item = vault
+                .get_item_version(item_id.as_bytes(), version)
+                .map_err(FfiError::other)?
+                .ok_or(FfiError::NotFound)?;
+            if item.item_type != expected_type {
+                return Err(FfiError::other(format!("item is not {what}")));
+            }
+            let s = std::str::from_utf8(&item.content)
+                .map_err(|_| FfiError::other(format!("{what} is not valid UTF-8")))?;
+            Ok(s.to_string())
+        })
     }
 
     /// Expands a group (recursively, dedup + protection against cycles/depth) into
@@ -4777,7 +4810,7 @@ fn connect_with_state(
     port: u16,
     user: String,
 ) -> Result<SshClient, FfiError> {
-    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = lock_recover(state);
     let st = guard.as_mut().ok_or(FfiError::Locked)?;
     let mut chain = Vec::with_capacity(jumps.len());
     for j in jumps {
@@ -5094,10 +5127,10 @@ impl AccountStatePayload {
     fn encode(&self) -> Vec<u8> {
         let user = self.default_username.as_bytes();
         let mut out = Vec::with_capacity(8 + self.personal_vault_id.len() + user.len());
-        out.extend_from_slice(&(self.personal_vault_id.len() as u32).to_be_bytes());
-        out.extend_from_slice(&self.personal_vault_id);
-        out.extend_from_slice(&(user.len() as u32).to_be_bytes());
-        out.extend_from_slice(user);
+        // Same u32-BE length-prefixed framing as the rest of the crate (see
+        // `put_len_bytes` / `ByteReader`) — byte-identical to the previous hand-rolled form.
+        put_len_bytes(&mut out, &self.personal_vault_id);
+        put_len_bytes(&mut out, user);
         out
     }
 
@@ -5105,19 +5138,14 @@ impl AccountStatePayload {
         let fmt = || FfiError::Other {
             msg: "malformed account-state payload".into(),
         };
-        let take = |b: &[u8]| -> Result<(Vec<u8>, usize), FfiError> {
-            if b.len() < 4 {
-                return Err(fmt());
-            }
-            let len = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
-            if b.len() < 4 + len {
-                return Err(fmt());
-            }
-            Ok((b[4..4 + len].to_vec(), 4 + len))
-        };
-        let (vid, n1) = take(b)?;
-        let (user, n2) = take(&b[n1..])?;
-        if n1 + n2 != b.len() {
+        // Reuse the crate's bounds-checked reader (checked_add overflow guard +
+        // truncation check) instead of a third hand-rolled framing copy. All parse
+        // errors are mapped back to the single `malformed` message, so behavior is
+        // unchanged; the trailing-bytes check is `pos == len` after both fields.
+        let mut r = ByteReader::new(b);
+        let vid = r.bytes().map_err(|_| fmt())?.to_vec();
+        let user = r.bytes().map_err(|_| fmt())?.to_vec();
+        if r.pos != b.len() {
             return Err(fmt());
         }
         Ok(AccountStatePayload {
@@ -5892,7 +5920,7 @@ impl ReconnectingSession {
             .rt
             .block_on(client.open_shell(&self.term, self.cols, self.rows, sink))
             .map_err(FfiError::ssh)?;
-        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some((client, shell));
+        *lock_recover(&self.current) = Some((client, shell));
         Ok(())
     }
 
@@ -5918,7 +5946,7 @@ impl ReconnectingSession {
     }
 
     fn try_write(&self, data: &[u8]) -> Result<(), FfiError> {
-        let guard = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_recover(&self.current);
         match guard.as_ref() {
             Some((_client, shell)) => self.rt.block_on(shell.write(data)).map_err(FfiError::ssh),
             None => Err(FfiError::other("not connected")),
@@ -5927,7 +5955,7 @@ impl ReconnectingSession {
 
     fn teardown(&self) {
         let _enter = self.rt.enter();
-        let mut guard = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.current);
         if let Some((client, shell)) = guard.take() {
             let _ = self.rt.block_on(shell.close());
             let _ = self.rt.block_on(client.disconnect());
@@ -5939,10 +5967,7 @@ impl ReconnectingSession {
 impl ReconnectingSession {
     /// Whether there is a live session right now.
     pub fn is_connected(&self) -> bool {
-        self.current
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        lock_recover(&self.current).is_some()
     }
 
     /// Sends input; on an error (drop) it auto-reconnects and retries.
@@ -5957,7 +5982,7 @@ impl ReconnectingSession {
     /// Resizes the current session (`cols`/`rows` > 0).
     pub fn resize(&self, cols: u32, rows: u32) -> Result<(), FfiError> {
         check_term_size(cols, rows)?;
-        let guard = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_recover(&self.current);
         match guard.as_ref() {
             Some((_client, shell)) => self
                 .rt
@@ -5970,10 +5995,7 @@ impl ReconnectingSession {
     /// Explicitly recreates the session (tears down the old one, reconnects with backoff).
     pub fn reconnect(&self) -> Result<(), FfiError> {
         // We serialize: concurrent reconnect() calls don't create orphan connections.
-        let _g = self
-            .reconnect_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = lock_recover(&self.reconnect_lock);
         self.teardown();
         self.connect_with_retry()
     }
@@ -6010,7 +6032,7 @@ impl BroadcastSession {
     /// Sends input to all active sessions (best-effort: a dead host does not
     /// block the others).
     pub fn write_all(&self, data: Vec<u8>) -> Result<(), FfiError> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_recover(&self.inner);
         for (_client, shell) in guard.iter() {
             let _ = self.rt.block_on(shell.write(&data));
         }
@@ -6020,7 +6042,7 @@ impl BroadcastSession {
     /// Resizes all active sessions (`cols`/`rows` > 0). Best-effort.
     pub fn resize_all(&self, cols: u32, rows: u32) -> Result<(), FfiError> {
         check_term_size(cols, rows)?;
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock_recover(&self.inner);
         for (_client, shell) in guard.iter() {
             let _ = self.rt.block_on(shell.resize(cols, rows));
         }
@@ -6032,7 +6054,7 @@ impl BroadcastSession {
         // block_on enters the runtime context (Drop of a russh channel may
         // tokio::spawn — without enter a drop outside the runtime panics).
         let _enter = self.rt.enter();
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.inner);
         for (client, shell) in guard.drain(..) {
             let _ = self.rt.block_on(shell.close());
             let _ = self.rt.block_on(client.disconnect());
@@ -6043,7 +6065,7 @@ impl BroadcastSession {
 impl Drop for BroadcastSession {
     fn drop(&mut self) {
         let _enter = self.rt.enter();
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_recover(&self.inner);
         guard.clear();
     }
 }
@@ -6073,8 +6095,8 @@ impl SshTunnel {
         // SshClient/ForwardGuard drop safely outside the runtime; block_on itself
         // enters the runtime context (so no separate enter — otherwise a nested
         // block_on panics).
-        let _ = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(c) = self.client.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = lock_recover(&self.guard).take();
+        if let Some(c) = lock_recover(&self.client).take() {
             let _ = self.rt.block_on(c.disconnect());
         }
     }
@@ -6085,8 +6107,8 @@ impl Drop for SshTunnel {
         // Deterministically stop the listener (ForwardGuard.abort on Drop).
         // SshClient (= Arc<Handle>) drops safely outside the runtime; a clean
         // disconnect is done only by close() (we don't call block_on in Drop here).
-        let _ = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let _ = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let _ = lock_recover(&self.guard).take();
+        let _ = lock_recover(&self.client).take();
     }
 }
 
@@ -6176,7 +6198,7 @@ impl SyncTransport for ForeignTransportAdapter {
         match self.inner.push_objects(blobs) {
             Ok(seqs) => Ok(seqs),
             Err(e) => {
-                *self.push_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+                *lock_recover(&self.push_err) = Some(e);
                 Err(unissh_sync::SyncError::Format)
             }
         }
@@ -6365,7 +6387,7 @@ impl SftpFfi {
     /// currency on return).
     fn lease(&self) -> Result<(SftpSession, u64), FfiError> {
         let mut open_retries: u32 = 0;
-        let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = lock_recover(&self.pool);
         loop {
             if p.closed {
                 return Err(FfiError::other("sftp session closed"));
@@ -6383,7 +6405,7 @@ impl SftpFfi {
                 match self.open_channel() {
                     Ok(ch) => return Ok((ch, gen)),
                     Err(e) => {
-                        p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+                        p = lock_recover(&self.pool);
                         p.created -= 1;
                         if p.created > 0 {
                             // There is a live channel to fall back to. The server refused a NEW one
@@ -6411,7 +6433,7 @@ impl SftpFfi {
                         }
                         drop(p);
                         std::thread::sleep(OPEN_RETRY_BACKOFF * open_retries);
-                        p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+                        p = lock_recover(&self.pool);
                     }
                 }
             } else {
@@ -6425,7 +6447,7 @@ impl SftpFfi {
     /// stale generation), decrementing `created`. In both cases it wakes one
     /// waiter for a lease.
     fn giveback(&self, ch: SftpSession, gen: u64, healthy: bool) {
-        let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = lock_recover(&self.pool);
         if healthy && !p.closed && gen == p.generation {
             p.idle.push(ch);
             drop(p);
@@ -6446,7 +6468,7 @@ impl SftpFfi {
     /// Bounded by a timeout: a silently-dead connection (keepalive off, no RST) would otherwise
     /// wait for OPEN-CONFIRM forever.
     fn open_channel(&self) -> Result<SftpSession, FfiError> {
-        let client_guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        let client_guard = lock_recover(&self.client);
         let client = client_guard
             .as_ref()
             .ok_or_else(|| FfiError::other("sftp client closed"))?;
@@ -6475,18 +6497,14 @@ impl SftpFfi {
             self.user.clone(),
         )?;
         let old_idle = {
-            let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = lock_recover(&self.pool);
             let old_idle = std::mem::take(&mut p.idle);
             p.created = p.created.saturating_sub(old_idle.len());
             p.generation = p.generation.wrapping_add(1);
             p.closed = false;
             old_idle
         };
-        let old_client = self
-            .client
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(client);
+        let old_client = lock_recover(&self.client).replace(client);
         // Wake all lease waiters: slots have freed up (created was decremented).
         self.pool_cv.notify_all();
         // The old idle channels and the client are dropped under rt.enter() (teardown → spawn).
@@ -6502,7 +6520,7 @@ impl SftpFfi {
     fn teardown(&self) {
         let _enter = self.rt.enter();
         let old_idle = {
-            let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = lock_recover(&self.pool);
             p.closed = true;
             let old_idle = std::mem::take(&mut p.idle);
             p.created = p.created.saturating_sub(old_idle.len());
@@ -6510,7 +6528,7 @@ impl SftpFfi {
         };
         self.pool_cv.notify_all();
         drop(old_idle);
-        let _ = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let _ = lock_recover(&self.client).take();
     }
 }
 
@@ -6655,15 +6673,12 @@ impl SftpFfi {
     pub fn reopen(&self) -> Result<(), FfiError> {
         // Serialize concurrent reopens so two racing callers can't each rebuild the
         // connection (one would be orphaned). Held across the whole escalation.
-        let _g = self
-            .reconnect_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = lock_recover(&self.reconnect_lock);
         // Fast path: open a fresh channel on the current connection — this is both a check
         // of transport liveness and a "warm-up" of the pool. On success we put it into the pool as idle.
         match self.open_channel() {
             Ok(ch) => {
-                let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+                let mut p = lock_recover(&self.pool);
                 if p.closed {
                     drop(p);
                     let _enter = self.rt.enter();
