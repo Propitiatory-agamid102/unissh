@@ -31,6 +31,11 @@ const COLS = 80;
 const ROWS = 24;
 const TAIL_LINES = 6;
 
+// Obviously-destructive verbs — typing one into a fan-out-to-many-live-hosts bar
+// always re-confirms, even after the session's first send has been confirmed.
+const BROADCAST_DANGER =
+  /(\brm\s+-\w*[rf]|\breboot\b|\bshutdown\b|\bhalt\b|\bpoweroff\b|\bmkfs|\bdd\s+if=|:\(\)\s*\{|>\s*\/dev\/)/i;
+
 /** Keep only the last N non-trailing-empty lines of a mirrored buffer. */
 function tail(buf: string, n: number): string[] {
   const lines = buf.split(/\r?\n/);
@@ -349,7 +354,8 @@ export function ViewBroadcast() {
     }
   };
 
-  const send = async () => {
+  const sentOnce = useRef(false);
+  const doSend = async () => {
     const id = bcIdRef.current;
     if (!id || liveCount === 0 || typed.length === 0) return;
     const data = Array.from(new TextEncoder().encode(typed + "\n"));
@@ -358,6 +364,30 @@ export function ViewBroadcast() {
       setTyped("");
     });
     inputRef.current?.focus();
+  };
+  // Fanning input out to many LIVE hosts is irreversible: confirm the FIRST send of a
+  // session (sober), and re-confirm (loud/danger) whenever the command looks
+  // destructive — no silent blast to the whole fleet.
+  const send = () => {
+    if (liveCount === 0 || typed.length === 0) return;
+    const dangerous = BROADCAST_DANGER.test(typed);
+    if (sentOnce.current && !dangerous) {
+      void doSend();
+      return;
+    }
+    useApp.getState().setConfirm({
+      title: dangerous ? t("broadcast.dangerTitle") : t("broadcast.sendConfirmTitle"),
+      body: dangerous
+        ? t("broadcast.dangerBody", { count: liveCount })
+        : t("broadcast.sendConfirmBody", { count: liveCount }),
+      danger: dangerous,
+      icon: dangerous ? "alert" : "radio",
+      confirmLabel: t("broadcast.sendConfirm"),
+      onConfirm: () => {
+        sentOnce.current = true;
+        void doSend();
+      },
+    });
   };
 
   const failed = opened.filter((h) => !h.status.connected);
