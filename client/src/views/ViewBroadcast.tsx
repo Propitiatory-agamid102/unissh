@@ -83,13 +83,13 @@ function HostTile({
           borderBottom: `1px solid ${p.line}`,
         }}
       >
-        <StatusDot status={off ? "offline" : "online"} size={7} />
+        <StatusDot status={off ? (mismatch ? "error" : "offline") : "online"} size={7} />
         <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>
           {host.profile.label}
         </span>
         <div style={{ flex: 1 }} />
-        <span style={{ fontFamily: MONO, fontSize: 10.5, color: off ? p.red : p.green }}>
-          {off ? t("broadcast.noRoute") : t("broadcast.mirrored")}
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: off ? p.txt3 : p.green }}>
+          {off ? t("broadcast.offline") : t("broadcast.mirrored")}
         </span>
       </div>
       <div
@@ -121,10 +121,7 @@ function HostTile({
             )}
           </div>
         ) : lines.length === 0 ? (
-          <div style={{ color: p.txt3 }}>
-            <span style={{ color: p.green }}>{host.profile.user}@{host.profile.label}</span>:~$
-            <span style={{ color: p.txt }}> </span>
-          </div>
+          <div style={{ color: p.txt3, fontStyle: "italic" }}>{t("broadcast.awaitingOutput")}</div>
         ) : (
           lines.map((ln, i) => (
             <div key={i} style={{ color: p.txt }}>
