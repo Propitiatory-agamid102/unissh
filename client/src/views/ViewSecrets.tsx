@@ -10,7 +10,7 @@ import { useTranslation } from "@/i18n";
 import { usePalette } from "@/theme/ThemeProvider";
 import { MONO, UI } from "@/theme/tokens";
 import { Btn, Icon, NO_AUTOCORRECT, VaultBadge } from "@/components/primitives";
-import { UnderlineTabs, fmtRelative, FlatAvatar } from "@/components/mono";
+import { UnderlineTabs, fmtRelative, FlatAvatar, MetaChip } from "@/components/mono";
 import { useApp } from "@/store/app";
 import { useCtx } from "@/store/ctx";
 import { useIsMobile } from "@/store/responsive";
@@ -218,6 +218,7 @@ function KeyRow({ item, isMobile }: { item: ItemInfo; isMobile: boolean }) {
   const p = usePalette();
   const { t, i18n } = useTranslation();
   const ctx = useCtx();
+  const uses = countKeyRefs(item.itemId);
   const vault = useApp((s) => s.vaultId);
   const [fp, setFp] = useState<string | null>(null);
   const [openssh, setOpenssh] = useState<string | null>(null);
@@ -303,7 +304,6 @@ function KeyRow({ item, isMobile }: { item: ItemInfo; isMobile: boolean }) {
     if (!vault) return;
     // Warn if the key still backs any host login (direct auth or a jump hop), so
     // deleting it doesn't silently break those connections.
-    const uses = countKeyRefs(item.itemId);
     ctx.confirm({
       title: t("secrets.deleteKeyTitle"),
       body: uses > 0 ? t("secrets.deleteKeyInUse", { item: item.itemId, count: uses }) : item.itemId,
@@ -383,6 +383,9 @@ function KeyRow({ item, isMobile }: { item: ItemInfo; isMobile: boolean }) {
       >
         {fp ?? "…"}
       </span>
+      <MetaChip icon="link" tone={uses === 0 ? "warn" : "neutral"}>
+        {uses === 0 ? t("secrets.unused") : t("secrets.usedByHosts", { count: uses })}
+      </MetaChip>
       <div
         style={{
           display: "flex",

@@ -788,6 +788,10 @@ export const ru = {
   secrets: {
     "title": "Секреты",
     "updatedAgo": "Обновлено {{ago}}",
+    "usedByHosts_one": "{{count}} хост",
+    "usedByHosts_few": "{{count}} хоста",
+    "usedByHosts_many": "{{count}} хостов",
+    "unused": "не используется",
     "newKey": "Новый ключ",
     "newPassword": "Новый пароль",
     "newIdentity": "Новая идентичность",

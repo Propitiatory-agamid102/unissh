@@ -754,6 +754,9 @@ export const en = {
   secrets: {
     "title": "Secrets",
     "updatedAgo": "Updated {{ago}}",
+    "usedByHosts_one": "{{count}} host",
+    "usedByHosts_other": "{{count}} hosts",
+    "unused": "unused",
     "newKey": "New key",
     "newPassword": "New password",
     "newIdentity": "New identity",
