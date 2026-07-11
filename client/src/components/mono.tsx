@@ -8,7 +8,7 @@
 import React, { useRef, useState } from "react";
 import { usePalette, useTheme } from "@/theme/ThemeProvider";
 import { MONO, UI } from "@/theme/tokens";
-import { BTN_RESET, Icon, IconName } from "@/components/primitives";
+import { BTN_RESET, Icon, IconName, Spinner } from "@/components/primitives";
 import { useMenu } from "@/components/a11y";
 
 // ── Card ───────────────────────────────────────────────────────
@@ -392,6 +392,37 @@ export function RowOverflowMenu({ items, ariaLabel }: { items: OverflowItem[]; a
         </div>
       )}
     </div>
+  );
+}
+
+// ── SyncBadge ──────────────────────────────────────────────────
+// Cloud-vault sync state (the currently-missing "is my vault up to date" signal):
+// synced = quiet green check, syncing = spinner, error = amber caution. Colour is
+// always paired with an icon + the passed word, never hue alone.
+export type SyncState = "synced" | "syncing" | "error";
+export function SyncBadge({ state, label, title }: { state: SyncState; label: string; title?: string }) {
+  const p = usePalette();
+  const color = state === "error" ? p.amber : state === "syncing" ? p.txt3 : p.green;
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11,
+        fontWeight: 600,
+        color,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {state === "syncing" ? (
+        <Spinner size={11} color={color} />
+      ) : (
+        <Icon name={state === "error" ? "alert" : "check"} size={12} color={color} stroke={1.9} />
+      )}
+      {label}
+    </span>
   );
 }
 

@@ -7,7 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePalette, useTheme } from "@/theme/ThemeProvider";
 import { MONO } from "@/theme/tokens";
 import { BTN_RESET, Icon, IconName, Logo, ResizeHandle, VaultBadge } from "@/components/primitives";
-import { FlatAvatar } from "@/components/mono";
+import { FlatAvatar, SyncBadge } from "@/components/mono";
 import { useMenu } from "@/components/a11y";
 import { useApp, HOST_FILTER_ALL } from "@/store/app";
 import type { Route } from "@/store/app";
@@ -313,7 +313,7 @@ function VaultSwitcher() {
   const [open, setOpen] = useState(false);
   const vaults = useApp((s) => s.vaults);
   const vaultId = useApp((s) => s.vaultId);
-  const hosts = useApp((s) => s.hosts);
+  const syncStatus = useApp((s) => s.syncStatus);
   const setVault = useApp((s) => s.setVault);
   const menuRef = useRef<HTMLDivElement>(null);
   // outside click / Escape close + ArrowUp/Down over the vault rows
@@ -371,7 +371,19 @@ function VaultSwitcher() {
               label={v.syncTarget === "cloud" ? t("vault.cloud") : t("vault.local")}
               size={11}
             />
-            <span>{vaultId === v.vaultId ? t("count.hosts", { count: hosts.length }) : "—"}</span>
+            {v.syncTarget === "cloud" && (
+              <SyncBadge
+                state={syncStatus.syncing ? "syncing" : syncStatus.lastError ? "error" : "synced"}
+                label={
+                  syncStatus.syncing
+                    ? t("shell.syncing")
+                    : syncStatus.lastError
+                      ? t("shell.syncError")
+                      : t("shell.synced")
+                }
+                title={syncStatus.lastError ?? undefined}
+              />
+            )}
           </span>
         </span>
         <Icon
