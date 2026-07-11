@@ -273,6 +273,10 @@ export const ru = {
       "tunnels": "-L / -R / -D",
       "known": "TOFU",
       "keys": "секреты",
+      "terminal": "живые сессии",
+      "passwords": "сохранённые пароли",
+      "identities": "SSH-идентичности",
+      "notes": "защищённые заметки",
       "settings": "настройки"
     },
     "action": {

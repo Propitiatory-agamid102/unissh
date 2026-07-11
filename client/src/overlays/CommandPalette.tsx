@@ -27,12 +27,16 @@ interface ActionCmd {
 
 const CMD_NAV: NavCmd[] = [
   { id: "n-hosts", icon: "server", labelKey: "nav.allHosts", subKey: "command.nav.hosts", route: "hosts" },
+  { id: "n-terminal", icon: "terminal", labelKey: "nav.terminals", subKey: "command.nav.terminal", route: "terminal" },
   { id: "n-sftp", icon: "folders", labelKey: "nav.sftp", subKey: "command.nav.sftp", route: "sftp" },
   { id: "n-broadcast", icon: "radio", labelKey: "nav.broadcast", subKey: "command.nav.broadcast", route: "broadcast" },
   { id: "n-fleet", icon: "layers", labelKey: "nav.fleetExec", subKey: "command.nav.fleet", route: "fleet" },
   { id: "n-tunnels", icon: "branch", labelKey: "nav.tunnels", subKey: "command.nav.tunnels", route: "tunnels" },
   { id: "n-known", icon: "shieldcheck", labelKey: "nav.known", subKey: "command.nav.known", route: "known" },
   { id: "n-keys", icon: "key", labelKey: "nav.keys", subKey: "command.nav.keys", route: "keys" },
+  { id: "n-passwords", icon: "lock", labelKey: "nav.passwords", subKey: "command.nav.passwords", route: "passwords" },
+  { id: "n-identities", icon: "fingerprint", labelKey: "nav.identities", subKey: "command.nav.identities", route: "identities" },
+  { id: "n-notes", icon: "note", labelKey: "nav.notes", subKey: "command.nav.notes", route: "notes" },
   { id: "n-settings", icon: "sliders", labelKey: "nav.settings", subKey: "command.nav.settings", route: "settings" },
 ];
 const CMD_ACTIONS: ActionCmd[] = [

@@ -240,6 +240,10 @@ export const en = {
       "tunnels": "-L / -R / -D",
       "known": "TOFU",
       "keys": "secrets",
+      "terminal": "live sessions",
+      "passwords": "stored passwords",
+      "identities": "SSH identities",
+      "notes": "secure notes",
       "settings": "preferences"
     },
     "action": {
