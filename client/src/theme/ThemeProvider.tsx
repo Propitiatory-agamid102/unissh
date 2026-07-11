@@ -113,15 +113,26 @@ function lsSet(key: string, val: string) {
 // a manual override on the side matching that theme's light/dark flag.
 function migrateThemeStore() {
   try {
-    if (Number(lsGet("unissh.themeV", "1")) >= 2) return;
-    const legacyTerm = lsGet("unissh.term", "nebula");
-    if (legacyTerm && legacyTerm !== "nebula") {
-      const known = [...TERM_THEMES, ...loadCustomThemes()];
-      const isLight = known.find((t) => t.id === legacyTerm)?.light ?? false;
-      lsSet(isLight ? "unissh.termOverrideLight" : "unissh.termOverrideDark", legacyTerm);
+    const v = Number(lsGet("unissh.themeV", "1"));
+    if (v >= 3) return;
+    // v1 → v2: adopt the family + per-mode-terminal-override model. The legacy
+    // default unissh.term="nebula" means "never chose one" → follow the theme link;
+    // any other value becomes a manual override on the matching light/dark side.
+    if (v < 2) {
+      const legacyTerm = lsGet("unissh.term", "nebula");
+      if (legacyTerm && legacyTerm !== "nebula") {
+        const known = [...TERM_THEMES, ...loadCustomThemes()];
+        const isLight = known.find((t) => t.id === legacyTerm)?.light ?? false;
+        lsSet(isLight ? "unissh.termOverrideLight" : "unissh.termOverrideDark", legacyTerm);
+      }
     }
-    if (lsGet("unissh.appTheme", "") === "") lsSet("unissh.appTheme", "nebula");
-    lsSet("unissh.themeV", "2");
+    // v2 → v3: the minimalist "mono" family becomes the default. Flip the old
+    // default (nebula) and any unset value to mono; preserve an explicit "candy"
+    // (only ever a deliberate opt-in). The theme manager still lets a user switch
+    // back at any time, so this is a reversible default change, not a lock-in.
+    const fam = lsGet("unissh.appTheme", "");
+    if (fam === "" || fam === "nebula") lsSet("unissh.appTheme", "mono");
+    lsSet("unissh.themeV", "3");
   } catch {
     /* best-effort: never block boot on a migration hiccup */
   }
@@ -131,10 +142,12 @@ migrateThemeStore();
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [mode, setModeState] = useState<Mode>(() => lsGet("unissh.mode", "auto") as Mode);
   const [family, setFamilyState] = useState<AppThemeFamily>(() => {
-    // Sanitize: a hand-edited / forward-incompatible unissh.appTheme must never
-    // reach resolveAppPalette / TERM_LINK as an unknown family (that would throw).
-    const stored = lsGet("unissh.appTheme", "nebula");
-    return stored === "candy" || stored === "nebula" ? stored : "nebula";
+    // Default (and fallback for a hand-edited / forward-incompatible value) is now
+    // "mono", the minimalist default family. An explicit "nebula"/"candy" is still
+    // honored so the theme manager round-trips; an unknown value can never reach
+    // resolveAppPalette / TERM_LINK (that would throw).
+    const stored = lsGet("unissh.appTheme", "mono");
+    return stored === "candy" || stored === "nebula" || stored === "mono" ? stored : "mono";
   });
   const [accent, setAccentState] = useState<AccentKey>(
     () => lsGet("unissh.accent", "blue") as AccentKey,
