@@ -406,10 +406,10 @@ function VaultSwitcher() {
           aria-label={t("shell.vaults")}
           style={{
             position: "absolute",
-            top: "100%",
+            bottom: "100%",
             left: 0,
             right: 0,
-            marginTop: 6,
+            marginBottom: 6,
             zIndex: 30,
             background: p.bg3,
             border: `1px solid ${p.line2}`,
@@ -703,7 +703,6 @@ export function Sidebar({
       }}
     >
       <ResizeHandle side="right" onDrag={onResize} />
-      <VaultSwitcher />
       <div style={{ overflow: "hidden", flex: 1, display: "flex", flexDirection: "column" }}>
         <NavGroup
           label={t("shell.groupsHeader")}
@@ -780,11 +779,12 @@ export function Sidebar({
           />
         </NavGroup>
       </div>
+      <div style={{ marginTop: 8, paddingTop: 10, borderTop: `1px solid ${p.line}` }}>
+        <VaultSwitcher />
+      </div>
       <div
         style={{
-          margin: "8px 12px 0",
-          paddingTop: 10,
-          borderTop: `1px solid ${p.line}`,
+          margin: "0 12px 0",
           display: "flex",
           alignItems: "center",
           justifyContent: "flex-end",
