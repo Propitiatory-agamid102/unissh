@@ -1,4 +1,4 @@
-//! Тесты P3: членство, гранты, верификация доступа, пиннинг member-pubkey.
+//! P3 tests: membership, grants, access verification, member-pubkey pinning.
 
 use unissh_crypto::{Ed25519Keypair, X25519Keypair};
 use unissh_keychain::{create_account, KdfParams, UnlockedKeyset};
@@ -24,10 +24,10 @@ fn new_vault_id_is_uuid_v4_16_bytes() {
     let a = new_vault_id();
     let b = new_vault_id();
     assert_eq!(a.len(), 16);
-    assert_ne!(a, b, "две генерации различны");
-    // версия 4: старший ниббл байта 6 == 0x4
+    assert_ne!(a, b, "two generations differ");
+    // version 4: high nibble of byte 6 == 0x4
     assert_eq!(a[6] >> 4, 0x4);
-    // вариант RFC 4122: два старших бита байта 8 == 0b10
+    // RFC 4122 variant: the two high bits of byte 8 == 0b10
     assert_eq!(a[8] >> 6, 0b10);
 }
 
@@ -49,9 +49,9 @@ fn genesis_manifest_anchored_on_creator_verifies() {
             role: MemberRole::Editor,
         },
     ];
-    // genesis (epoch 1) подписан создателем (он же admin в наборе)
+    // genesis (epoch 1) is signed by the creator (who is also admin in the set)
     let m = build_manifest(&creator, &vid, 1, &members).unwrap();
-    // verify против genesis-owner = pubkey создателя
+    // verify against genesis-owner = the creator's pubkey
     let verified = verify_manifest(&m, &vid, None, &creator_ed).unwrap();
     assert_eq!(verified.epoch(), 1);
     assert!(verified.contains(&alice_ed));
@@ -68,7 +68,7 @@ fn forged_manifest_signature_rejected() {
         role: MemberRole::Admin,
     }];
     let mut m = build_manifest(&creator, &vid, 1, &members).unwrap();
-    // порча подписи
+    // corrupt the signature
     *m.signature.last_mut().unwrap() ^= 0xff;
     assert!(matches!(
         verify_manifest(&m, &vid, None, &creator_ed).unwrap_err(),
@@ -83,13 +83,13 @@ fn genesis_manifest_not_signed_by_creator_rejected() {
     let vid = new_vault_id();
     let creator_ed = creator.signing.verifying.to_bytes().to_vec();
     let attacker_ed = attacker.signing.verifying.to_bytes().to_vec();
-    // атакующий подписывает genesis, ставя себя admin
+    // the attacker signs genesis, making themselves admin
     let members = vec![Member {
         ed25519_pub: attacker_ed,
         role: MemberRole::Admin,
     }];
     let m = build_manifest(&attacker, &vid, 1, &members).unwrap();
-    // verify против правильного genesis-owner (создателя) → отказ авторитета
+    // verify against the correct genesis-owner (the creator) → authority denied
     assert!(matches!(
         verify_manifest(&m, &vid, None, &creator_ed).unwrap_err(),
         VaultError::AuthorityInvalid
@@ -99,7 +99,7 @@ fn genesis_manifest_not_signed_by_creator_rejected() {
 #[test]
 fn next_epoch_manifest_signed_by_prior_admin_verifies() {
     let creator = keyset(); // admin@epoch1
-    let bob = keyset(); // станет admin@epoch1 тоже
+    let bob = keyset(); // will also become admin@epoch1
     let vid = new_vault_id();
     let creator_ed = creator.signing.verifying.to_bytes().to_vec();
     let bob_ed = bob.signing.verifying.to_bytes().to_vec();
@@ -120,7 +120,7 @@ fn next_epoch_manifest_signed_by_prior_admin_verifies() {
     )
     .unwrap();
     let v1 = verify_manifest(&m1, &vid, None, &creator_ed).unwrap();
-    // epoch 2 подписан bob (admin в epoch1) — авторитет ок
+    // epoch 2 is signed by bob (admin in epoch1) — authority ok
     let m2 = build_manifest(
         &bob,
         &vid,
@@ -159,7 +159,7 @@ fn next_epoch_manifest_signed_by_non_admin_rejected() {
     )
     .unwrap();
     let v1 = verify_manifest(&m1, &vid, None, &creator_ed).unwrap();
-    // epoch2 подписан viewer (не admin@epoch1) → отказ
+    // epoch2 is signed by viewer (not admin@epoch1) → rejected
     let m2 = build_manifest(&viewer, &vid, 2, &[]).unwrap();
     assert!(matches!(
         verify_manifest(&m2, &vid, Some(&v1), &creator_ed).unwrap_err(),
@@ -183,7 +183,7 @@ fn next_epoch_must_be_prev_plus_one() {
     )
     .unwrap();
     let v1 = verify_manifest(&m1, &vid, None, &creator_ed).unwrap();
-    // epoch 3 поверх epoch1 (пропуск 2) → монотонность нарушена
+    // epoch 3 on top of epoch1 (skipping 2) → monotonicity violated
     let m3 = build_manifest(
         &creator,
         &vid,
@@ -207,14 +207,14 @@ fn grant_roundtrip_open_with_correct_recipient() {
     let admin = keyset();
     let vid = new_vault_id();
     let admin_ed = admin.signing.verifying.to_bytes().to_vec();
-    // получатель
+    // recipient
     let recipient = X25519Keypair::generate();
     let recip_x = recipient.public.to_bytes().to_vec();
     let member_ed = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     let vk = unissh_crypto::SymmetricKey::generate();
 
-    // Получатель должен быть членом набора (новый инвариант verify_grant) с
-    // ролью, совпадающей с ролью гранта.
+    // The recipient must be a member of the set (a new verify_grant invariant)
+    // with a role matching the grant's role.
     let members = vec![
         Member {
             ed25519_pub: admin_ed.clone(),
@@ -261,7 +261,7 @@ fn grant_open_wrong_epoch_fails() {
         &vk,
     )
     .unwrap();
-    // открытие с эпохой 2 → info не сходится
+    // opening with epoch 2 → the info doesn't match
     assert!(matches!(
         open_grant(&grant, &vid, &recipient.secret, &member_ed, 2, 0).unwrap_err(),
         VaultError::Decrypt
@@ -418,7 +418,7 @@ fn grant_signed_by_non_admin_rejected() {
     )
     .unwrap();
     let v = verify_manifest(&m, &vid, None, &admin_ed).unwrap();
-    // грант подписан editor (не admin) → verify_grant отказ авторитета
+    // grant is signed by editor (not admin) → verify_grant denies authority
     let grant = build_grant(
         &editor,
         &vid,
@@ -439,7 +439,7 @@ fn grant_signed_by_non_admin_rejected() {
 
 use unissh_storage::MembershipManifest;
 
-// Хелпер: положить проверяемый manifest в storage (как это сделает add_member).
+// Helper: put a verified manifest into storage (as add_member would).
 fn put_manifest(st: &Storage, m: &MembershipManifest) {
     st.put_membership_manifest(m).unwrap();
 }
@@ -468,16 +468,16 @@ fn authority_accepts_member_at_epoch() {
     )
     .unwrap();
     put_manifest(&st, &m);
-    // genesis_owner = admin (создатель). author_ed — член@1, пол=0.
+    // genesis_owner = admin (creator). author_ed is a member@1, floor=0.
     unissh_vault::verify_record_authority(&st, &vid, &author_ed, 1, &admin_ed).unwrap();
 }
 
 #[test]
 fn authority_rejects_viewer_authoring_content() {
-    // RBAC write-integrity: Viewer (read-only) ЧИСЛИТСЯ членом, но не вправе
-    // авторить item/vault-записи. verify_record_authority обязан отказать
-    // (иначе read-only член мог бы создавать/перезаписывать/томбстонить записи,
-    // а verify-before-apply у других членов принял бы их как аутентичные).
+    // RBAC write-integrity: a Viewer (read-only) IS listed as a member but is not
+    // allowed to author item/vault records. verify_record_authority must deny it
+    // (otherwise a read-only member could create/overwrite/tombstone records, and
+    // other members' verify-before-apply would accept them as authentic).
     let st = storage();
     let admin = keyset();
     let vid = new_vault_id();
@@ -500,12 +500,12 @@ fn authority_rejects_viewer_authoring_content() {
     )
     .unwrap();
     put_manifest(&st, &m);
-    // Viewer — член@1, но не writer → AuthorityInvalid.
+    // Viewer is a member@1 but not a writer → AuthorityInvalid.
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &viewer_ed, 1, &admin_ed).unwrap_err(),
         VaultError::AuthorityInvalid
     ));
-    // Admin из того же набора — пишет нормально (контроль).
+    // Admin from the same set writes fine (control).
     unissh_vault::verify_record_authority(&st, &vid, &admin_ed, 1, &admin_ed).unwrap();
 }
 
@@ -550,7 +550,7 @@ fn authority_rejects_rolled_back_epoch() {
     )
     .unwrap();
     put_manifest(&st, &m);
-    // пол эпохи = 5; запись на эпохе 1 (< пол) → откат
+    // epoch floor = 5; a record at epoch 1 (< floor) → rollback
     st.set_vault_epoch_floor(&vid, 5).unwrap();
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &admin_ed, 1, &admin_ed).unwrap_err(),
@@ -565,7 +565,7 @@ fn authority_falls_back_to_owner_when_no_manifest() {
     let vid = new_vault_id();
     let owner_ed = owner.signing.verifying.to_bytes().to_vec();
     let other = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
-    // нет manifest → genesis_owner играет роль доверенного владельца
+    // no manifest → genesis_owner acts as the trusted owner
     unissh_vault::verify_record_authority(&st, &vid, &owner_ed, 0, &owner_ed).unwrap();
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &other, 0, &owner_ed).unwrap_err(),
@@ -575,10 +575,11 @@ fn authority_falls_back_to_owner_when_no_manifest() {
 
 #[test]
 fn authority_rejects_epoch_without_manifest_in_membership_mode() {
-    // АНТИ-ROLLBACK BYPASS (high): волт В membership-режиме (есть manifest@1 + пол),
-    // но запись предъявляет key_epoch=0 (эпоха БЕЗ manifest). Режим НЕ должен
-    // вычисляться по-записно: даунгрейд на owner==author запрещён. Даже валидный
-    // owner-автор на эпохе без manifest в membership-режиме → отказ.
+    // ANTI-ROLLBACK BYPASS (high): the vault is IN membership mode (manifest@1 +
+    // floor present), but a record presents key_epoch=0 (an epoch WITHOUT a
+    // manifest). The mode must NOT be computed per-record: a downgrade to
+    // owner==author is forbidden. Even a valid owner-author at an epoch without a
+    // manifest, in membership mode → rejected.
     let st = storage();
     let admin = keyset();
     let vid = new_vault_id();
@@ -594,9 +595,9 @@ fn authority_rejects_epoch_without_manifest_in_membership_mode() {
     )
     .unwrap();
     put_manifest(&st, &m);
-    // volt-level сигнал membership-режима: пол эпохи установлен.
+    // vault-level signal of membership mode: the epoch floor is set.
     st.set_vault_epoch_floor(&vid, 1).unwrap();
-    // admin — genesis_owner И член@1, НО предъявляет key_epoch=0 (без manifest).
+    // admin is genesis_owner AND a member@1, BUT presents key_epoch=0 (no manifest).
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &admin_ed, 0, &admin_ed).unwrap_err(),
         VaultError::EpochInvalid
@@ -622,9 +623,9 @@ fn pin_tofu_then_match_ok() {
     let st = storage();
     let acct = b"alice-account".to_vec();
     let ed = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
-    // TOFU: первый раз пиннится
+    // TOFU: pinned on the first encounter
     pin_and_verify_member(&st, &acct, &ed).unwrap();
-    // второй раз — совпадает с пином → ок
+    // second time — matches the pin → ok
     pin_and_verify_member(&st, &acct, &ed).unwrap();
     let pinned = st.get_pinned_member_key(&acct).unwrap().unwrap();
     assert_eq!(pinned.member_pubkey, ed);
@@ -638,12 +639,12 @@ fn pin_mismatch_rejected() {
     let ed = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     let imposter = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     pin_and_verify_member(&st, &acct, &ed).unwrap();
-    // другой ключ под тем же account → mismatch (НЕ перезапись)
+    // a different key under the same account → mismatch (NOT overwritten)
     assert!(matches!(
         pin_and_verify_member(&st, &acct, &imposter).unwrap_err(),
         VaultError::PinMismatch
     ));
-    // пин не изменился
+    // the pin is unchanged
     assert_eq!(
         st.get_pinned_member_key(&acct)
             .unwrap()
@@ -658,9 +659,9 @@ fn vault_anchor_tofu_then_match_ok() {
     let st = storage();
     let vid = b"vault-x".to_vec();
     let creator = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
-    // TOFU: первый раз пиннится
+    // TOFU: pinned on the first encounter
     pin_and_verify_vault_anchor(&st, &vid, &creator).unwrap();
-    // второй раз тем же creator-pubkey → ок (идемпотентно)
+    // second time with the same creator-pubkey → ok (idempotent)
     pin_and_verify_vault_anchor(&st, &vid, &creator).unwrap();
     let anchor = st.get_vault_trust_anchor(&vid).unwrap().unwrap();
     assert_eq!(anchor.genesis_owner_pubkey, creator);
@@ -673,7 +674,7 @@ fn vault_anchor_rebind_rejected() {
     let creator = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     let imposter = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     pin_and_verify_vault_anchor(&st, &vid, &creator).unwrap();
-    // сервер пытается ре-биндить volt→owner на другой ключ → PinMismatch, без перезаписи
+    // the server tries to re-bind vault→owner to a different key → PinMismatch, no overwrite
     assert!(matches!(
         pin_and_verify_vault_anchor(&st, &vid, &imposter).unwrap_err(),
         VaultError::PinMismatch
@@ -695,7 +696,7 @@ fn add_member_persists_verified_manifest_and_grants() {
     let admin = keyset();
     let vid = new_vault_id();
     let admin_ed = admin.signing.verifying.to_bytes().to_vec();
-    // получатель (новый член)
+    // recipient (new member)
     let recip_kc = keyset();
     let recip_ed = recip_kc.signing.verifying.to_bytes().to_vec();
     let recip_x = recip_kc.encryption.public.to_bytes().to_vec();
@@ -717,12 +718,12 @@ fn add_member_persists_verified_manifest_and_grants() {
     )
     .unwrap();
 
-    // manifest и грант в storage
+    // manifest and grant in storage
     let m = st.get_membership_manifest(&vid, 1).unwrap().unwrap();
     assert_eq!(m.key_epoch, 1);
     let gs = st.list_membership_grants(&vid, 1).unwrap();
     assert_eq!(gs.len(), 1);
-    // получатель открывает свой грант → VK
+    // the recipient opens their grant → VK
     let opened = open_grant(&gs[0], &vid, &recip_kc.encryption.secret, &recip_ed, 1, 0).unwrap();
     assert_eq!(opened.expose_bytes(), vk.expose_bytes());
 }
@@ -736,7 +737,7 @@ fn add_member_rejects_unauthorized_admin() {
     let creator_ed = creator.signing.verifying.to_bytes().to_vec();
     let attacker_ed = attacker.signing.verifying.to_bytes().to_vec();
     let vk = unissh_crypto::SymmetricKey::generate();
-    // attacker пытается выпустить genesis, ставя себя admin, но genesis_owner=creator
+    // the attacker tries to issue genesis, making themselves admin, but genesis_owner=creator
     let members = vec![Member {
         ed25519_pub: attacker_ed.clone(),
         role: MemberRole::Admin,
@@ -754,13 +755,13 @@ fn add_member_rejects_unauthorized_admin() {
     )
     .unwrap_err();
     assert!(matches!(err, VaultError::AuthorityInvalid));
-    // ничего не записано
+    // nothing written
     assert!(st.get_membership_manifest(&vid, 1).unwrap().is_none());
 }
 
 #[test]
 fn local_vault_flow_unchanged_with_no_manifest() {
-    // D2: волт без manifest ведёт себя как раньше (owner==author).
+    // D2: a vault with no manifest behaves as before (owner==author).
     let st = storage();
     let ks = keyset();
     let v = Vault::create(&st, &ks, b"local-v".to_vec(), b"name").unwrap();
@@ -771,15 +772,15 @@ fn local_vault_flow_unchanged_with_no_manifest() {
     assert!(report.ok);
 }
 
-// --- Регресс P3-ревью: read-path авторитет САМОДОСТАТОЧЕН (D1 от genesis) ---
+// --- P3-review regression: read-path authority is SELF-SUFFICIENT (D1 from genesis) ---
 
 #[test]
 fn authority_rejects_self_consistent_injected_manifest_at_later_epoch() {
-    // Угроза (untrusted-DB / sync-ready): оператор инъектирует в storage
-    // самосогласованный manifest эпохи 2 (author=attacker, members=[attacker]),
-    // НЕ через add_member (т.е. без D1-цепочки от genesis). До фикса read-путь
-    // верил storage и принимал его. Теперь verify_record_authority обязан
-    // перепроверить цепочку от genesis_owner и отказать.
+    // Threat (untrusted-DB / sync-ready): the operator injects into storage a
+    // self-consistent epoch-2 manifest (author=attacker, members=[attacker]),
+    // NOT via add_member (i.e. without a D1 chain from genesis). Before the fix the
+    // read path trusted storage and accepted it. Now verify_record_authority must
+    // re-verify the chain from genesis_owner and reject it.
     let st = storage();
     let creator = keyset();
     let attacker = keyset();
@@ -787,7 +788,7 @@ fn authority_rejects_self_consistent_injected_manifest_at_later_epoch() {
     let creator_ed = creator.signing.verifying.to_bytes().to_vec();
     let attacker_ed = attacker.signing.verifying.to_bytes().to_vec();
 
-    // Легитимный genesis (epoch 1): только creator-admin.
+    // Legitimate genesis (epoch 1): creator-admin only.
     let m1 = build_manifest(
         &creator,
         &vid,
@@ -800,9 +801,9 @@ fn authority_rejects_self_consistent_injected_manifest_at_later_epoch() {
     .unwrap();
     put_manifest(&st, &m1);
 
-    // Инъекция: самосогласованный manifest эпохи 2, подписанный attacker,
-    // ставящий attacker admin-членом. Подпись валидна ПОД attacker, но цепочка
-    // от genesis (creator) к нему не ведёт.
+    // Injection: a self-consistent epoch-2 manifest signed by attacker, making
+    // attacker an admin member. The signature is valid UNDER attacker, but no chain
+    // from genesis (creator) leads to it.
     let m2_forged = build_manifest(
         &attacker,
         &vid,
@@ -815,7 +816,7 @@ fn authority_rejects_self_consistent_injected_manifest_at_later_epoch() {
     .unwrap();
     put_manifest(&st, &m2_forged);
 
-    // Запись attacker на эпохе 2 должна быть отклонена (нет авторитета от genesis).
+    // An attacker record at epoch 2 must be rejected (no authority from genesis).
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &attacker_ed, 2, &creator_ed).unwrap_err(),
         VaultError::AuthorityInvalid
@@ -824,8 +825,8 @@ fn authority_rejects_self_consistent_injected_manifest_at_later_epoch() {
 
 #[test]
 fn authority_accepts_legitimately_chained_later_epoch() {
-    // Контроль к предыдущему: если эпоха 2 ЗАКОННО связана с genesis (подписана
-    // admin из эпохи 1), запись её члена принимается.
+    // Control for the previous test: if epoch 2 is LEGITIMATELY chained to genesis
+    // (signed by an admin from epoch 1), a record from its member is accepted.
     let st = storage();
     let creator = keyset();
     let bob = keyset();
@@ -851,7 +852,7 @@ fn authority_accepts_legitimately_chained_later_epoch() {
     )
     .unwrap();
     put_manifest(&st, &m1);
-    // epoch 2 подписан bob (admin@1) — законная цепочка.
+    // epoch 2 is signed by bob (admin@1) — a legitimate chain.
     let m2 = build_manifest(
         &bob,
         &vid,
@@ -869,9 +870,9 @@ fn authority_accepts_legitimately_chained_later_epoch() {
 
 #[test]
 fn authority_rejects_when_intermediate_manifest_missing() {
-    // Цепочка с дырой: есть genesis (epoch1) и manifest эпохи 3, но эпоха 2
-    // отсутствует в storage. Перепроверка цепочки невозможна → отказ
-    // (нельзя доказать авторитет автора на эпохе 3).
+    // Chain with a hole: genesis (epoch1) and an epoch-3 manifest exist, but epoch 2
+    // is missing from storage. Re-verifying the chain is impossible → rejected
+    // (the author's authority at epoch 3 cannot be proven).
     let st = storage();
     let creator = keyset();
     let vid = new_vault_id();
@@ -888,7 +889,7 @@ fn authority_rejects_when_intermediate_manifest_missing() {
     )
     .unwrap();
     put_manifest(&st, &m1);
-    // самосогласованный manifest эпохи 3 (без эпохи 2 в storage).
+    // self-consistent epoch-3 manifest (with no epoch 2 in storage).
     let m3 = build_manifest(
         &creator,
         &vid,
@@ -909,9 +910,9 @@ fn authority_rejects_when_intermediate_manifest_missing() {
 
 #[test]
 fn authority_rejects_tampered_genesis_under_pinned_owner() {
-    // Genesis в storage подменён на подписанный attacker (анти-anchor): даже
-    // single-epoch read-путь обязан сверять genesis с пиннингованным
-    // genesis_owner, а не доверять storage.
+    // The genesis in storage is swapped for one signed by attacker (anti-anchor):
+    // even the single-epoch read path must check genesis against the pinned
+    // genesis_owner rather than trust storage.
     let st = storage();
     let creator = keyset();
     let attacker = keyset();
@@ -931,25 +932,25 @@ fn authority_rejects_tampered_genesis_under_pinned_owner() {
     .unwrap();
     put_manifest(&st, &m1_forged);
 
-    // genesis_owner пиннингован = creator; injected genesis подписан attacker.
+    // genesis_owner is pinned = creator; the injected genesis is signed by attacker.
     assert!(matches!(
         unissh_vault::verify_record_authority(&st, &vid, &attacker_ed, 1, &creator_ed).unwrap_err(),
         VaultError::AuthorityInvalid
     ));
 }
 
-// --- Регресс P3-ревью: verify_grant сверяет членство/роль получателя ---
+// --- P3-review regression: verify_grant checks the recipient's membership/role ---
 
 #[test]
 fn grant_to_non_member_rejected() {
-    // Defense-in-depth: admin не должен иметь возможности выдать VK-обёртку
-    // ключу, которого нет в manifest (иначе не-член получает VK-конверт).
+    // Defense-in-depth: an admin must not be able to hand a VK wrap to a key that
+    // is not in the manifest (otherwise a non-member receives a VK envelope).
     let admin = keyset();
     let vid = new_vault_id();
     let admin_ed = admin.signing.verifying.to_bytes().to_vec();
     let recipient = X25519Keypair::generate();
     let recip_x = recipient.public.to_bytes().to_vec();
-    // member_ed НЕ входит в manifest.
+    // member_ed is NOT in the manifest.
     let non_member_ed = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     let vk = unissh_crypto::SymmetricKey::generate();
 
@@ -983,7 +984,7 @@ fn grant_to_non_member_rejected() {
 
 #[test]
 fn grant_role_mismatch_with_manifest_rejected() {
-    // Роль в гранте должна совпадать с ролью получателя в manifest.
+    // The role in the grant must match the recipient's role in the manifest.
     let admin = keyset();
     let vid = new_vault_id();
     let admin_ed = admin.signing.verifying.to_bytes().to_vec();
@@ -992,7 +993,7 @@ fn grant_role_mismatch_with_manifest_rejected() {
     let member_ed = Ed25519Keypair::generate().verifying.to_bytes().to_vec();
     let vk = unissh_crypto::SymmetricKey::generate();
 
-    // member числится Viewer в manifest.
+    // member is listed as Viewer in the manifest.
     let m = build_manifest(
         &admin,
         &vid,
@@ -1011,7 +1012,7 @@ fn grant_role_mismatch_with_manifest_rejected() {
     .unwrap();
     let v = verify_manifest(&m, &vid, None, &admin_ed).unwrap();
 
-    // грант выписан с ролью Editor (≠ Viewer) → отказ консистентности.
+    // the grant is issued with role Editor (≠ Viewer) → consistency rejected.
     let grant = build_grant(
         &admin,
         &vid,
@@ -1030,8 +1031,8 @@ fn grant_role_mismatch_with_manifest_rejected() {
 
 #[test]
 fn grant_to_member_with_matching_role_ok() {
-    // Контроль: грант члену с совпадающей ролью проходит (не регрессируем
-    // легитимный путь).
+    // Control: a grant to a member with a matching role passes (don't regress
+    // the legitimate path).
     let admin = keyset();
     let vid = new_vault_id();
     let admin_ed = admin.signing.verifying.to_bytes().to_vec();
@@ -1071,7 +1072,7 @@ fn grant_to_member_with_matching_role_ok() {
     verify_grant(&grant, &vid, &v).unwrap();
 }
 
-// --- P7: Vault::establish_or_extend_membership (VK остаётся в ядре) ---
+// --- P7: Vault::establish_or_extend_membership (the VK stays in the core) ---
 
 #[test]
 fn establish_membership_via_vault_method_and_extend() {
@@ -1106,11 +1107,11 @@ fn establish_membership_via_vault_method_and_extend() {
         .unwrap();
     assert_eq!(epoch, 1);
 
-    // цепочка до epoch 1 верифицируется, оба члена присутствуют
+    // the chain up to epoch 1 verifies, both members are present
     let verified = verify_chain_to_epoch(&st, v.vault_id(), 1, &owner_ed).unwrap();
     assert!(verified.contains(&owner_ed) && verified.contains(&bob_ed));
 
-    // расширение: добавляем carol → новый manifest на epoch 2
+    // extension: add carol → a new manifest at epoch 2
     let carol = keyset();
     let carol_ed = carol.signing.verifying.to_bytes().to_vec();
     let carol_x = carol.encryption.public.to_bytes().to_vec();
@@ -1155,14 +1156,14 @@ fn set_cache_policy_bumps_version_and_persists() {
     )
     .unwrap();
     let vid = v.vault_id().to_vec();
-    // дефолт — OfflineAllowed
+    // default — OfflineAllowed
     let rec0 = st.get_vault(&vid).unwrap().unwrap();
     assert!(matches!(rec0.cache_policy, CachePolicy::OfflineAllowed));
     v.set_cache_policy(CachePolicy::OnlineOnly).unwrap();
     let rec1 = st.get_vault(&vid).unwrap().unwrap();
     assert!(matches!(rec1.cache_policy, CachePolicy::OnlineOnly));
     assert_eq!(rec1.version, rec0.version + 1);
-    // волт всё ещё открывается (переподпись валидна)
+    // the vault still opens (re-signing is valid)
     let reopened = Vault::open(&st, &owner, &vid).unwrap();
     assert_eq!(reopened.name(), b"cp");
 }
@@ -1172,10 +1173,10 @@ fn account_payload_seal_open_roundtrip() {
     let ks = keyset();
     let plaintext = b"personal-vault-ptr + default username".to_vec();
     let sealed = seal_account_payload(&ks, &plaintext).unwrap();
-    assert_ne!(sealed, plaintext, "payload должен быть зашифрован");
+    assert_ne!(sealed, plaintext, "payload must be encrypted");
     let opened = open_account_payload(&ks, &sealed).unwrap();
     assert_eq!(opened, plaintext, "self-seal round-trip");
-    // Чужой keyset НЕ открывает.
+    // A foreign keyset does NOT open it.
     let other = keyset();
     assert!(open_account_payload(&other, &sealed).is_err());
 }

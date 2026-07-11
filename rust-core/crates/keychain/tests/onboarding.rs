@@ -45,7 +45,7 @@ fn pake_onboarding_happy_path_transfers_identity() {
     assert_eq!(
         sk.expose_bytes(),
         device_sk.expose_bytes(),
-        "общий аккаунтный Secret Key на обоих устройствах"
+        "a shared account Secret Key on both devices"
     );
     // the device record opens with the local password + the shared account Secret Key.
     let reopened = unlock_account(&device_record, Some(b"device-pw"), &device_sk).unwrap();

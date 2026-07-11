@@ -1,30 +1,30 @@
 //! # unissh-ffi
 //!
-//! FFI-граница ядра UniSSH (ТЗ 4). Фасад [`Core`] связывает `keychain`,
-//! `storage`, `vault`, `ssh-agent`, `ssh-transport` в стабильный контракт для UI
+//! FFI boundary of the UniSSH core (spec 4). The [`Core`] facade ties `keychain`,
+//! `storage`, `vault`, `ssh-agent`, `ssh-transport` into a stable contract for the UI
 //! (UniFFI → Swift/Kotlin/…).
 //!
-//! ## Граница секретов (контракт; зафиксирован тестом `secret_returning_surface`)
-//! Приватный **keyset устройства** (ключи подписи/шифрования инстанса) НИКОГДА не
-//! пересекает FFI-границу. Обычные вызовы отдают только публичные ключи и
-//! результаты сессий. Секретный материал уходит наружу ТОЛЬКО по явному,
-//! инициированному пользователем действию — и таких методов ровно несколько
-//! (исчерпывающий список — в тесте):
-//! - [`Core::get_password`] / [`Core::get_note`] — reveal пользовательского
-//!   секрета (поведение менеджера паролей); для item другого типа — отказ;
-//! - [`Core::export_ssh_key`] — экспорт приватного SSH-ключа. Это ОСОЗНАННАЯ
-//!   возможность: пользователь владеет своими ключами и вправе их вынести — мы
-//!   не запираем их в закрытую экосистему. Вызов всегда явный, по действию юзера;
-//! - [`Core::export_vault`] — passphrase-зашифрованный бэкап волта.
+//! ## Secret boundary (contract; pinned by the `secret_returning_surface` test)
+//! The private **device keyset** (the instance's signing/encryption keys) NEVER
+//! crosses the FFI boundary. Ordinary calls return only public keys and
+//! session results. Secret material leaves ONLY through an explicit,
+//! user-initiated action — and there are exactly a handful of such methods
+//! (the exhaustive list is in the test):
+//! - [`Core::get_password`] / [`Core::get_note`] — reveal of a user
+//!   secret (password-manager behavior); for an item of another type — refused;
+//! - [`Core::export_ssh_key`] — export of a private SSH key. This is a DELIBERATE
+//!   capability: the user owns their keys and is entitled to take them out — we
+//!   don't lock them into a closed ecosystem. The call is always explicit, on user action;
+//! - [`Core::export_vault`] — a passphrase-encrypted vault backup.
 //!
-//! Любой НОВЫЙ метод, возвращающий секретный материал, обязан быть добавлен и
-//! сюда, и в перечисляющий тест — это tripwire против случайной утечки.
+//! Any NEW method that returns secret material must be added both
+//! here and to the enumerating test — this is a tripwire against accidental leakage.
 //!
-//! ## Модель
-//! Локальный инстанс = файл зашифрованной БД (`storage`) + сайдкар с зашифрованным
-//! keyset. Ключ SQLCipher выводится из секретов распакованного keyset (нужна
-//! разблокировка). SSH-сессии запускаются через встроенный агент (ключ в агенте,
-//! не в UI).
+//! ## Model
+//! A local instance = an encrypted DB file (`storage`) + a sidecar holding the encrypted
+//! keyset. The SQLCipher key is derived from the secrets of the unwrapped keyset (requires
+//! an unlock). SSH sessions are launched through the embedded agent (the key lives in the agent,
+//! not in the UI).
 
 #![allow(clippy::arc_with_non_send_sync)]
 
@@ -59,70 +59,70 @@ use unissh_vault::{
 
 uniffi::setup_scaffolding!();
 
-/// Тип item для SSH-ключа (открытые метаданные).
+/// Item type for an SSH key (public metadata).
 const ITEM_TYPE_SSH_KEY: u32 = 1;
-/// Тип item для SSH user-сертификата.
+/// Item type for an SSH user certificate.
 const ITEM_TYPE_SSH_CERT: u32 = 2;
-/// Тип item для профиля соединения (сохранённый «хост»).
+/// Item type for a connection profile (a saved "host").
 const ITEM_TYPE_CONNECTION: u32 = 3;
-/// Тип item для пароля сервера (контент — UTF-8 байты пароля).
+/// Item type for a server password (content is the UTF-8 bytes of the password).
 const ITEM_TYPE_PASSWORD: u32 = 4;
-/// Тип item для группы хостов (контент — JSON [`StoredGroup`]).
+/// Item type for a host group (content is JSON [`StoredGroup`]).
 const ITEM_TYPE_GROUP: u32 = 5;
-/// Тип item для зашифрованной заметки (контент — произвольный UTF-8).
+/// Item type for an encrypted note (content is arbitrary UTF-8).
 const ITEM_TYPE_NOTE: u32 = 6;
-/// Тип item для личной идентичности (контент — JSON [`StoredIdentity`]:
-/// username + ссылки на ключ/пароль-item в том же волте).
+/// Item type for a personal identity (content is JSON [`StoredIdentity`]:
+/// username + references to a key/password item in the same vault).
 const ITEM_TYPE_IDENTITY: u32 = 7;
-/// Тип item для привязки идентичности к shared-хосту (контент — JSON
-/// [`StoredBinding`]). Живёт в ЛИЧНОМ волте; ключуется по (team_vault_id,
-/// profile_uid). Синкается только между устройствами аккаунта.
+/// Item type for a binding of an identity to a shared host (content is JSON
+/// [`StoredBinding`]). Lives in the PERSONAL vault; keyed by (team_vault_id,
+/// profile_uid). Synced only between the account's devices.
 const ITEM_TYPE_BINDING: u32 = 8;
-/// Предел глубины раскрытия вложенных групп (защита от раздувания/зацикливания
-/// сверх visited-set).
+/// Depth limit for expanding nested groups (guards against blow-up/cycling
+/// beyond the visited-set).
 const GROUP_MAX_DEPTH: u32 = 32;
 
-/// Id item-сертификата для данного ключа.
+/// Id of the certificate item for a given key.
 fn cert_item_id(key_item_id: &str) -> String {
     format!("{key_item_id}.cert")
 }
 
-/// Ошибки FFI-границы.
+/// FFI-boundary errors.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
-    /// Ядро не разблокировано.
+    /// The core is locked.
     #[error("core is locked")]
     Locked,
-    /// Неверный пароль или Secret Key.
+    /// Invalid password or Secret Key.
     #[error("invalid credentials")]
     InvalidCredentials,
-    /// Объект не найден.
+    /// Object not found.
     #[error("not found")]
     NotFound,
-    /// Инстанс по этому пути уже существует (защита от перезаписи keyset/БД).
+    /// An instance already exists at this path (guards against overwriting the keyset/DB).
     #[error("instance already exists")]
     AlreadyExists,
-    /// Host key не совпал с закреплённым — возможный MITM (показать пользователю
-    /// `fingerprint` предъявленного ключа и предложить `trust_host`).
+    /// The host key did not match the pinned one — a possible MITM (show the user
+    /// the `fingerprint` of the presented key and offer `trust_host`).
     #[error("host key mismatch for {host}:{port}; presented {fingerprint}")]
     HostKeyMismatch {
-        /// Хост.
+        /// Host.
         host: String,
-        /// Порт.
+        /// Port.
         port: u16,
-        /// SHA256-отпечаток ФАКТИЧЕСКИ предъявленного сервером ключа.
+        /// SHA256 fingerprint of the key the server ACTUALLY presented.
         fingerprint: String,
     },
-    /// Ошибка SSH.
+    /// SSH error.
     #[error("ssh error: {msg}")]
     Ssh {
-        /// Сообщение.
+        /// Message.
         msg: String,
     },
-    /// Прочая ошибка.
+    /// Other error.
     #[error("{msg}")]
     Other {
-        /// Сообщение.
+        /// Message.
         msg: String,
     },
 }
@@ -136,30 +136,30 @@ impl FfiError {
     }
 }
 
-/// Краткая информация о волте.
+/// Brief information about a vault.
 #[derive(uniffi::Record)]
 pub struct VaultInfo {
-    /// Идентификатор волта.
+    /// Vault identifier.
     pub vault_id: String,
-    /// Имя волта.
+    /// Vault name.
     pub name: String,
-    /// Цель синхронизации: локальный волт или облачный. Для значка Local/Cloud в
-    /// UI и гейтинга облачных операций (членство/синк/онбординг разрешены только
-    /// для Cloud). Берётся из `VaultRecord.sync_target`.
+    /// Sync target: a local or a cloud vault. For the Local/Cloud badge in
+    /// the UI and for gating cloud operations (membership/sync/onboarding are allowed only
+    /// for Cloud). Taken from `VaultRecord.sync_target`.
     pub sync_target: FfiSyncTarget,
-    /// **1:1-привязка cloud-волта к серверу:** `tenant_id` сервера (та же base64-
-    /// строка, что в `ServerConfig.tenant_id`), с которым синкается этот облачный
-    /// волт. `None` — не привязан (локальный волт ИЛИ ещё-не-привязанный legacy
-    /// cloud-волт). UI показывает, к какому серверу привязан волт.
+    /// **1:1 binding of a cloud vault to a server:** the server's `tenant_id` (the same base64
+    /// string as in `ServerConfig.tenant_id`) with which this cloud
+    /// vault is synced. `None` — not bound (a local vault OR a not-yet-bound legacy
+    /// cloud vault). The UI shows which server the vault is bound to.
     pub sync_tenant: Option<String>,
 }
 
-/// Цель синхронизации волта для UI (зеркало `unissh_storage::SyncTarget`).
+/// Vault sync target for the UI (mirror of `unissh_storage::SyncTarget`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiSyncTarget {
-    /// Локальный волт: на сервер не уходит.
+    /// Local vault: never leaves for a server.
     Local,
-    /// Облачный волт: синкается с сервером.
+    /// Cloud vault: synced with a server.
     Cloud,
 }
 
@@ -168,131 +168,131 @@ impl FfiSyncTarget {
         match t {
             SyncTarget::Local => FfiSyncTarget::Local,
             SyncTarget::Cloud => FfiSyncTarget::Cloud,
-            // SyncTarget — non_exhaustive: неизвестная будущая цель → консервативно
-            // Local (никаких облачных операций/гейтинга для неизвестной цели).
+            // SyncTarget is non_exhaustive: an unknown future target → conservatively
+            // Local (no cloud operations/gating for an unknown target).
             _ => FfiSyncTarget::Local,
         }
     }
 }
 
-/// Регистрационный запрос к серверу (server-tz §5.3): канонический payload
-/// (`RegistrationPayload::canonical`) + само-подпись (домен
-/// `unissh-registration-v1`). Клиент шлёт их как два base64-поля
-/// (`registration_payload` + `registration_signature`) в `/v1/bootstrap` или
-/// `/v1/register`. Оба — публичные данные (account-id + публичные ключи + подпись).
+/// Registration request to the server (server-tz §5.3): the canonical payload
+/// (`RegistrationPayload::canonical`) + a self-signature (domain
+/// `unissh-registration-v1`). The client sends them as two base64 fields
+/// (`registration_payload` + `registration_signature`) to `/v1/bootstrap` or
+/// `/v1/register`. Both are public data (account-id + public keys + signature).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RegistrationRequest {
-    /// Канонический payload: `u16 len(account_id) || account_id || x25519(32) || ed25519(32)`.
+    /// Canonical payload: `u16 len(account_id) || account_id || x25519(32) || ed25519(32)`.
     pub payload: Vec<u8>,
-    /// Подпись payload Ed25519-ключом keyset (67-байтный блоб).
+    /// Signature of the payload by the keyset's Ed25519 key (a 67-byte blob).
     pub signature: Vec<u8>,
 }
 
-/// Краткая информация об item.
+/// Brief information about an item.
 #[derive(uniffi::Record)]
 pub struct ItemInfo {
-    /// Идентификатор item.
+    /// Item identifier.
     pub item_id: String,
-    /// Тип item.
+    /// Item type.
     pub item_type: u32,
-    /// Версия.
+    /// Version.
     pub version: u64,
-    /// Когда создан (unix-сек; 0, если неизвестно).
+    /// When created (unix seconds; 0 if unknown).
     pub created_at: i64,
-    /// Когда последний раз изменён (unix-сек).
+    /// When last modified (unix seconds).
     pub updated_at: i64,
-    /// Есть ли привязанный SSH-сертификат (для item-ключа).
+    /// Whether an SSH certificate is attached (for a key item).
     pub has_certificate: bool,
 }
 
-/// Публичный ключ item + его отпечаток (для показа/копирования в UI).
+/// An item's public key + its fingerprint (for display/copy in the UI).
 #[derive(uniffi::Record)]
 pub struct PublicKeyInfo {
-    /// Публичный ключ в формате OpenSSH (`ssh-ed25519 AAAA...`).
+    /// Public key in OpenSSH format (`ssh-ed25519 AAAA...`).
     pub openssh: String,
-    /// SHA256-отпечаток (`SHA256:...`).
+    /// SHA256 fingerprint (`SHA256:...`).
     pub fingerprint: String,
 }
 
-/// Запись каталога SFTP.
+/// An SFTP directory entry.
 #[derive(uniffi::Record)]
 pub struct SftpEntry {
-    /// Имя файла (без пути).
+    /// File name (without path).
     pub filename: String,
-    /// Каталог ли это.
+    /// Whether this is a directory.
     pub is_dir: bool,
-    /// Размер в байтах.
+    /// Size in bytes.
     pub size: u64,
-    /// Unix-биты режима (полный st_mode), 0 если неизвестно.
+    /// Unix mode bits (full st_mode), 0 if unknown.
     pub mode: u32,
-    /// Время изменения, секунды от эпохи; 0 если неизвестно.
+    /// Modification time, seconds since the epoch; 0 if unknown.
     pub mtime: u64,
 }
 
-/// Результат SFTP stat.
+/// Result of an SFTP stat.
 #[derive(uniffi::Record)]
 pub struct SftpFileStat {
-    /// Размер в байтах.
+    /// Size in bytes.
     pub size: u64,
-    /// Каталог ли это.
+    /// Whether this is a directory.
     pub is_dir: bool,
-    /// Unix-биты режима (полный st_mode), 0 если неизвестно.
+    /// Unix mode bits (full st_mode), 0 if unknown.
     pub mode: u32,
-    /// Время изменения, секунды от эпохи; 0 если неизвестно.
+    /// Modification time, seconds since the epoch; 0 if unknown.
     pub mtime: u64,
 }
 
-/// Сохранённый профиль соединения («хост»). `profile_id` — это id item в волте.
+/// A saved connection profile (a "host"). `profile_id` is the item id in the vault.
 #[derive(uniffi::Record, Clone)]
 pub struct ConnectionProfile {
-    /// Идентификатор профиля (item_id в волте).
+    /// Profile identifier (item_id in the vault).
     pub profile_id: String,
-    /// Неизменяемый uid профиля (внутри шифр-тела; не меняется при правке
-    /// host/label). Стабильный ключ для binding'ов личной идентичности (B3).
-    /// На создании пустой — ядро минтит при [`Core::save_connection`].
+    /// Immutable profile uid (inside the ciphertext body; does not change on edits to
+    /// host/label). A stable key for personal-identity bindings (B3).
+    /// Empty on creation — the core mints it in [`Core::save_connection`].
     pub uid: String,
-    /// Человекочитаемая метка.
+    /// Human-readable label.
     pub label: String,
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Порт.
+    /// Port.
     pub port: u16,
-    /// Пользователь.
+    /// User.
     pub user: String,
-    /// Способ аутентификации (ссылки на items волта; секретов внутри нет).
+    /// Authentication method (references to vault items; no secrets inside).
     pub auth: ProfileAuth,
-    /// Username-шаблон: `%u` → username идентичности; для шлюзов, кодирующих цель в
-    /// username-шаблоне `{identity.user}:{target}` (B4.2, обычно с `Personal`).
+    /// Username template: `%u` → the identity's username; for gateways that encode the target in
+    /// the username template `{identity.user}:{target}` (B4.2, usually with `Personal`).
     pub username_template: Option<String>,
-    /// ProxyJump-цепочка.
+    /// ProxyJump chain.
     pub jumps: Vec<JumpHost>,
-    /// Метки для организации/выборки целей (например `prod`, `web`, `eu`). Это
-    /// фильтр выборки, а не права доступа (RBAC — серверная Веха 2).
+    /// Tags for organizing/selecting targets (e.g. `prod`, `web`, `eu`). This is
+    /// a selection filter, not access rights (RBAC is server Milestone 2).
     pub tags: Vec<String>,
 }
 
-/// Личная идентичность: SSH-креды под одним именем (username + опц. ссылки на
-/// ключ и/или пароль-item в ТОМ ЖЕ волте). Живёт первично в личном волте и
-/// линкуется с shared-хостом через binding (Phase B3), поэтому личные креды не
-/// попадают в общий волт. `identity_id` — это item_id в волте. Секрет внутрь не
-/// встраивается — только ссылки (как `ProfileAuth`).
+/// A personal identity: SSH credentials under a single name (username + optional references to
+/// a key and/or a password item in the SAME vault). Lives primarily in the personal vault and
+/// is linked to a shared host via a binding (Phase B3), so personal credentials do not
+/// end up in the shared vault. `identity_id` is the item_id in the vault. A secret is not
+/// embedded inside — only references (like `ProfileAuth`).
 #[derive(uniffi::Record, Clone)]
 pub struct Identity {
-    /// Идентификатор (item_id в волте).
+    /// Identifier (item_id in the vault).
     pub identity_id: String,
-    /// Человекочитаемая метка.
+    /// Human-readable label.
     pub label: String,
-    /// Имя пользователя для входа.
+    /// Login username.
     pub user: String,
-    /// Ссылка на ключ-item (тип «SSH-ключ») в этом волте, если задан.
+    /// Reference to a key item (type "SSH key") in this vault, if set.
     pub key_item_id: Option<String>,
-    /// Ссылка на пароль-item (тип «пароль») в этом волте, если задан.
+    /// Reference to a password item (type "password") in this vault, if set.
     pub password_item_id: Option<String>,
 }
 
-/// Сериализуемое тело идентичности (JSON в контенте item). `identity_id` не
-/// сериализуется — это id item. Плоские опциональные поля (как у `StoredProfile`)
-/// для forward-совместимости.
+/// Serializable identity body (JSON in the item content). `identity_id` is not
+/// serialized — it is the item id. Flat optional fields (as in `StoredProfile`)
+/// for forward compatibility.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredIdentity {
     label: String,
@@ -301,7 +301,7 @@ struct StoredIdentity {
     key_item_id: Option<String>,
     #[serde(default)]
     password_item_id: Option<String>,
-    /// Forward-совместимость (см. [`StoredProfile::extra`]).
+    /// Forward compatibility (see [`StoredProfile::extra`]).
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
@@ -318,34 +318,34 @@ impl StoredIdentity {
     }
 }
 
-/// Привязка личной идентичности к shared-хосту. Живёт в ЛИЧНОМ волте (синкается
-/// только между устройствами аккаунта), поэтому личные креды и сам факт линковки
-/// не видны команде. Ключуется по (`team_vault_id`, `profile_uid`): волт
-/// shared-профиля + его неизменяемый uid (B2.1, устойчив к правке/рециклу id).
+/// A binding of a personal identity to a shared host. Lives in the PERSONAL vault (synced
+/// only between the account's devices), so personal credentials and the very fact of the linkage
+/// are not visible to the team. Keyed by (`team_vault_id`, `profile_uid`): the vault
+/// of the shared profile + its immutable uid (B2.1, resilient to id edits/recycling).
 #[derive(uniffi::Record, Clone)]
 pub struct IdentityBinding {
-    /// Волт shared-профиля (куда привязываемся).
+    /// The shared profile's vault (what we bind to).
     pub team_vault_id: String,
-    /// Неизменяемый uid shared-профиля.
+    /// The shared profile's immutable uid.
     pub profile_uid: String,
-    /// Id идентичности (item в личном волте), которой логинимся.
+    /// Id of the identity (an item in the personal vault) we log in with.
     pub identity_item_id: String,
-    /// Закреплённый пункт назначения (`host:port`; с учётом username-шаблона и
-    /// username-шаблона) на момент привязки. Анти-редирект-якорь: при коннекте
-    /// сверяется с текущим отрендеренным назначением (см. [`resolve_binding`]).
+    /// The pinned destination (`host:port`; accounting for the username template and
+    /// the username template) at bind time. An anti-redirect anchor: on connect
+    /// it is checked against the currently rendered destination (see [`resolve_binding`]).
     pub destination_pin: String,
 }
 
-/// Сериализуемое тело привязки (JSON в контенте item личного волта). Поля key
-/// (`team_vault_id`, `profile_uid`) дублируются в теле для листинга; сам item_id
-/// детерминирован от них ([`binding_item_id`]).
+/// Serializable binding body (JSON in the content of a personal-vault item). The key fields
+/// (`team_vault_id`, `profile_uid`) are duplicated in the body for listing; the item_id itself
+/// is derived deterministically from them ([`binding_item_id`]).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredBinding {
     team_vault_id: String,
     profile_uid: String,
     identity_item_id: String,
     destination_pin: String,
-    /// Forward-совместимость (см. [`StoredProfile::extra`]).
+    /// Forward compatibility (see [`StoredProfile::extra`]).
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
@@ -361,28 +361,28 @@ impl StoredBinding {
     }
 }
 
-/// Итог резолва привязки при коннекте (с анти-редирект-проверкой). Отдаётся
-/// клиенту: `Unbound` → fallback; `Matched` → логиниться личной идентичностью;
-/// `Redirected` → показать re-bind, личный кред НЕ слать. Строгую in-core-защиту
-/// (коннект сам отказывает при редиректе) доведёт Personal-auth (B4); это —
-/// запрос-примитив для UX-слоя.
+/// The result of resolving a binding at connect time (with an anti-redirect check). Returned
+/// to the client: `Unbound` → fallback; `Matched` → log in with the personal identity;
+/// `Redirected` → show re-bind, do NOT send the personal credential. Strict in-core protection
+/// (the connect itself refuses on a redirect) is finished by Personal-auth (B4); this is
+/// a query primitive for the UX layer.
 #[derive(uniffi::Enum, Debug, PartialEq, Eq, Clone)]
 pub enum BindingResolution {
-    /// Привязки нет — использовать fallback (prompt / коннект без личных кредов).
+    /// No binding — use the fallback (prompt / connect without personal credentials).
     Unbound,
-    /// Привязка есть и текущий пункт назначения совпал с закреплённым — можно
-    /// логиниться личной идентичностью `identity_item_id`.
+    /// A binding exists and the current destination matched the pinned one — one may
+    /// log in with the personal identity `identity_item_id`.
     Matched { identity_item_id: String },
-    /// Привязка есть, но текущее назначение ОТЛИЧАЕТСЯ от закреплённого: хост
-    /// мог быть переклеен (in-place правка host или username-шаблона) →
-    /// ОТКАЗ отправлять личный кред, нужна явная перепривязка.
+    /// A binding exists, but the current destination DIFFERS from the pinned one: the host
+    /// may have been re-pointed (an in-place edit of host or the username template) →
+    /// REFUSE to send the personal credential; an explicit re-bind is required.
     Redirected { pinned: String, current: String },
 }
 
-/// Чистая анти-редирект-логика: сверяет текущий отрендеренный пункт назначения с
-/// закреплённым в привязке. Никогда не «обучается» новому назначению молча —
-/// расхождение всегда даёт [`BindingResolution::Redirected`] (нужен явный
-/// re-bind). Вынесена отдельно для юнит-тестируемости без живого коннекта.
+/// Pure anti-redirect logic: checks the currently rendered destination against
+/// the one pinned in the binding. Never silently "learns" a new destination —
+/// a mismatch always yields [`BindingResolution::Redirected`] (an explicit
+/// re-bind is required). Split out for unit-testability without a live connect.
 fn resolve_binding(
     binding: Option<&IdentityBinding>,
     current_destination: &str,
@@ -399,8 +399,8 @@ fn resolve_binding(
     }
 }
 
-/// Детерминированный item_id привязки в личном волте от (team_vault_id,
-/// profile_uid): одна привязка на пару, прямой O(1)-lookup при коннекте.
+/// Deterministic item_id of a binding in the personal vault, from (team_vault_id,
+/// profile_uid): one binding per pair, a direct O(1) lookup at connect time.
 fn binding_item_id(team_vault_id: &str, profile_uid: &str) -> String {
     use sha2::Digest;
     let mut h = Sha256::new();
@@ -411,21 +411,21 @@ fn binding_item_id(team_vault_id: &str, profile_uid: &str) -> String {
     format!("binding:{}", hex::encode(&h.finalize()[..16]))
 }
 
-/// Разрешённая личная аутентификация для коннекта к shared-хосту: конкретный
-/// vault-квалифицированный [`AuthMethod`] (ключ/пароль из ЛИЧНОГО волта) плюс
-/// username из идентичности. Возвращается [`Core::resolve_personal_auth`] уже
-/// ПОСЛЕ анти-редирект-проверки — т.е. личный кред резолвится только для
-/// закреплённого назначения.
+/// Resolved personal authentication for connecting to a shared host: a concrete
+/// vault-qualified [`AuthMethod`] (a key/password from the PERSONAL vault) plus
+/// the username from the identity. Returned by [`Core::resolve_personal_auth`] only
+/// AFTER the anti-redirect check — i.e. the personal credential is resolved only for
+/// the pinned destination.
 #[derive(uniffi::Record, Clone)]
 pub struct PersonalAuth {
-    /// Имя пользователя (identity.user → fallback профиля → account-default).
+    /// Username (identity.user → profile fallback → account-default).
     pub user: String,
-    /// Конкретный способ аутентификации (ссылка на ключ/пароль в личном волте).
+    /// The concrete authentication method (a reference to a key/password in the personal vault).
     pub auth: AuthMethod,
 }
 
-/// username-цепочка для Personal: identity.user → fallback профиля →
-/// account-default → пусто. Первый непустой (trim) выигрывает.
+/// Username chain for Personal: identity.user → profile fallback →
+/// account-default → empty. The first non-empty (trimmed) one wins.
 fn pick_username(
     identity_user: &str,
     profile_fallback: &str,
@@ -443,9 +443,9 @@ fn pick_username(
         .unwrap_or_default()
 }
 
-/// Каноническая строка ЦЕПОЧКИ ПРЫЖКОВ для анти-редиректа. Пустая цепочка → "".
-/// Каждый хоп: `host:port:user` (inline) или `ref=vault/uid` (host-chain B2.2).
-/// Любая правка/вставка/переупорядочение прыжка меняет строку → меняет пин.
+/// Canonical JUMP-CHAIN string for anti-redirect. An empty chain → "".
+/// Each hop: `host:port:user` (inline) or `ref=vault/uid` (host-chain B2.2).
+/// Any edit/insertion/reordering of a jump changes the string → changes the pin.
 fn canonical_jumps(jumps: &[JumpHost]) -> String {
     jumps
         .iter()
@@ -457,15 +457,15 @@ fn canonical_jumps(jumps: &[JumpHost]) -> String {
         .join(">")
 }
 
-/// Каноническое строковое назначение для закрепления/сверки (анти-редирект).
-/// ВКЛЮЧАЕТ username-шаблон (`host:port#template`), чтобы его правка
-/// меняла назначение и триггерила Redirected. ВКЛЮЧАЕТ и цепочку ProxyJump
-/// (`|via=...`), когда она непуста — иначе админ команды вставил бы MITM-прыжок в
-/// общий Personal-профиль (host:port не меняется → пин совпадал бы) и увёл бы
-/// личный кред участника через свою машину. Хосты без прыжков дают прежнюю строку
-/// (обратная совместимость со старыми пинами); появление прыжка → Redirected →
-/// отказ (fail-safe), а не утечка. Клиент рендерит им И пин при bind'е, И
-/// `current_destination` при коннекте — форматы гарантированно совпадают.
+/// Canonical string destination for pinning/checking (anti-redirect).
+/// INCLUDES the username template (`host:port#template`) so that editing it
+/// changes the destination and triggers Redirected. ALSO includes the ProxyJump chain
+/// (`|via=...`) when it is non-empty — otherwise a team admin could insert a MITM jump into
+/// a shared Personal profile (host:port unchanged → the pin would still match) and siphon off
+/// a member's personal credential through their own machine. Hosts without jumps yield the previous string
+/// (backward compatibility with old pins); the appearance of a jump → Redirected →
+/// refusal (fail-safe), not a leak. The client renders with this both the pin at bind time and
+/// `current_destination` at connect time — the formats are guaranteed to match.
 fn personal_destination(
     host: &str,
     port: u16,
@@ -483,11 +483,11 @@ fn personal_destination(
     }
 }
 
-/// Шаблон финального username коннекта (гейтвей-агностично): подстановка `%u`
-/// на username идентичности. Пусто → просто `base_user`. Покрывает warpgate-подобные
-/// сценарии (`%u:prod-db` → `alice:prod-db`) и любой шлюз, кодирующий цель в имени
-/// (`%u@target`, `target+%u` и т.п.), не завязываясь на конкретный продукт. Клиент
-/// применяет тот же шаблон, что попадает в destination-пин (форматы совпадают).
+/// Template for the final connect username (gateway-agnostic): substitution of `%u`
+/// with the identity's username. Empty → just `base_user`. Covers warpgate-like
+/// scenarios (`%u:prod-db` → `alice:prod-db`) and any gateway that encodes the target in the name
+/// (`%u@target`, `target+%u`, etc.) without tying to a specific product. The client
+/// applies the same template that goes into the destination pin (the formats match).
 fn apply_username_template(base_user: &str, username_template: Option<&str>) -> String {
     match username_template {
         Some(t) if !t.trim().is_empty() => t.trim().replace("%u", base_user),
@@ -495,43 +495,43 @@ fn apply_username_template(base_user: &str, username_template: Option<&str>) -> 
     }
 }
 
-/// Способ аутентификации, сохранённый в профиле. Содержит только **ссылки** на
-/// items волта — сам секрет в JSON профиля не встраивается никогда.
+/// The authentication method stored in a profile. Contains only **references** to
+/// vault items — the secret itself is never embedded in the profile's JSON.
 #[derive(uniffi::Enum, Clone)]
 pub enum ProfileAuth {
-    /// Ключом из волта (item типа «SSH-ключ»).
+    /// By a key from the vault (an item of type "SSH key").
     Key {
-        /// Id ключа-item.
+        /// Id of the key item.
         key_item_id: String,
     },
-    /// Паролем из волта (item типа «пароль»).
+    /// By a password from the vault (an item of type "password").
     VaultPassword {
-        /// Id пароля-item.
+        /// Id of the password item.
         password_item_id: String,
     },
-    /// Пароль спрашивается у пользователя при каждом подключении.
+    /// The password is prompted from the user on every connection.
     PromptPassword,
-    /// Личной идентичностью: у shared-профиля НЕТ хранимых кредов; каждый член
-    /// линкует свою идентичность через binding в личном волте (B3). При коннекте
-    /// креды и username берутся из личного волта ([`Core::resolve_personal_auth`]),
-    /// личные секреты в общий волт не попадают. Дефолт при переносе хоста в
-    /// cloud-волт (B5).
+    /// By a personal identity: a shared profile has NO stored credentials; each member
+    /// links their own identity via a binding in the personal vault (B3). At connect time
+    /// the credentials and username are taken from the personal vault ([`Core::resolve_personal_auth`]),
+    /// personal secrets never reach the shared vault. The default when moving a host into
+    /// a cloud vault (B5).
     Personal,
 }
 
-/// Внутреннее (сериализуемое) тело профиля. `profile_id` не сериализуется — это
-/// id item. JSON хранится как зашифрованный контент item (слой vault).
+/// Internal (serializable) profile body. `profile_id` is not serialized — it is
+/// the item id. The JSON is stored as the item's encrypted content (vault layer).
 ///
-/// Совместимость: плоские опциональные поля вместо enum — старые профили (без
-/// `password_item_id`) читаются как есть; `password_item_id` приоритетнее
-/// `key_item_id`, оба `None` → парольная аутентификация с вводом при коннекте.
+/// Compatibility: flat optional fields instead of an enum — old profiles (without
+/// `password_item_id`) are read as-is; `password_item_id` takes priority over
+/// `key_item_id`; both `None` → password authentication with a prompt at connect time.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredProfile {
-    /// Неизменяемый uid профиля (внутри шифр-тела). Минтится при создании,
-    /// НЕ переписывается при правке (host/label меняются, uid — нет). Стабильный
-    /// ключ для binding'ов (Phase B3), устойчивый к рециклу item_id после
-    /// tombstone. Легаси-профили без него получают детерминированный fallback
-    /// при чтении ([`legacy_profile_uid`]), закрепляемый при первом пере-сохранении.
+    /// Immutable profile uid (inside the ciphertext body). Minted on creation,
+    /// NOT rewritten on edits (host/label change, the uid does not). A stable
+    /// key for bindings (Phase B3), resilient to item_id recycling after a
+    /// tombstone. Legacy profiles without it get a deterministic fallback
+    /// on read ([`legacy_profile_uid`]), pinned on the first re-save.
     #[serde(default)]
     uid: Option<String>,
     label: String,
@@ -542,38 +542,38 @@ struct StoredProfile {
     key_item_id: Option<String>,
     #[serde(default)]
     password_item_id: Option<String>,
-    /// Personal-профиль: кредов в этом (общем) волте нет, логинимся личной
-    /// идентичностью через binding (B4). Приоритетнее key/password-ссылок.
+    /// Personal profile: there are no credentials in this (shared) vault; we log in with a personal
+    /// identity via a binding (B4). Takes priority over key/password references.
     #[serde(default)]
     personal: bool,
-    /// Username-шаблон: если задан, целевой
-    /// сервер кодируется в username (`{identity.user}:{target}`, B4.2). Обычно
-    /// вместе с `personal`. Правка target покрыта анти-редиректом (входит в
-    /// закрепляемое назначение).
+    /// Username template: if set, the target
+    /// server is encoded in the username (`{identity.user}:{target}`, B4.2). Usually
+    /// together with `personal`. Editing the target is covered by anti-redirect (it is part of
+    /// the pinned destination).
     #[serde(default)]
     username_template: Option<String>,
     jumps: Vec<StoredJump>,
     #[serde(default)]
     tags: Vec<String>,
-    /// Forward-совместимость: неизвестные поля (добавленные будущей версией)
-    /// сохраняются при round-trip, а не отбрасываются. Иначе клиент СТАРЕЕ поля
-    /// прочитал бы профиль без нового поля (напр. `personal`), а при пере-
-    /// сохранении вырезал бы его → LWW-даунгрейд для всех. Пусто → сериализуется
-    /// в ничто (существующие подписанные items байт-в-байт не меняются).
+    /// Forward compatibility: unknown fields (added by a future version)
+    /// are preserved on round-trip rather than dropped. Otherwise an OLDER client would
+    /// read the profile without the new field (e.g. `personal`), and on re-
+    /// save would strip it → an LWW downgrade for everyone. Empty → serializes
+    /// to nothing (existing signed items do not change byte-for-byte).
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
 
-/// Сериализуемое тело host-chain-ссылки (B2.2).
+/// Serializable body of a host-chain reference (B2.2).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredHopRef {
     vault_id: String,
     profile_uid: String,
 }
 
-/// Сериализуемый jump-хост. Легаси-формат хранил `key_item_id` строкой
-/// (возможно пустой — «ключ не назначен»); новые записи задают ровно одно из
-/// полей. Inline-пароль здесь невозможен по построению.
+/// Serializable jump host. The legacy format stored `key_item_id` as a string
+/// (possibly empty — "no key assigned"); new records set exactly one of the
+/// fields. An inline password is impossible here by construction.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredJump {
     host: String,
@@ -583,256 +583,256 @@ struct StoredJump {
     key_item_id: Option<String>,
     #[serde(default)]
     password_item_id: Option<String>,
-    /// Host-chain-ссылка (B2.2): хоп ссылается на другой профиль по uid.
+    /// Host-chain reference (B2.2): the hop references another profile by uid.
     #[serde(default)]
     hop_ref: Option<StoredHopRef>,
-    /// Forward-совместимость на уровне serde round-trip. Замечание: при правке
-    /// профиля хопы пересобираются из FFI `JumpHost` ([`jump_to_stored`]), так
-    /// что merge-on-save (как у [`StoredProfile::extra`]) для хопов НЕ выполняется
-    /// — jump-уровневые будущие поля переживают только чистый sync (raw bytes),
-    /// не FFI-правку. Приемлемо: хопы редко получают новые синкаемые поля.
+    /// Forward compatibility at the serde round-trip level. Note: when editing
+    /// a profile, hops are rebuilt from the FFI `JumpHost` ([`jump_to_stored`]), so
+    /// merge-on-save (as in [`StoredProfile::extra`]) is NOT performed for hops
+    /// — jump-level future fields survive only a pure sync (raw bytes),
+    /// not an FFI edit. Acceptable: hops rarely gain new synced fields.
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
 
-/// Способ аутентификации на хосте (целевом или jump) при подключении.
+/// Authentication method for a host (target or jump) when connecting.
 ///
-/// Ссылки на items волта **vault-квалифицированы**: каждый метод несёт `vault_id`
-/// того волта, где лежит ключ/пароль. Это позволяет цели и каждому jump-хопу
-/// брать креды из РАЗНЫХ волтов (общий бастион в командном волте + личная
-/// идентичность в личном волте) — см. [`resolve_auth`], который резолвит каждый
-/// метод против его собственного волта, а не одного общего.
+/// References to vault items are **vault-qualified**: each method carries the `vault_id`
+/// of the vault where the key/password lives. This lets the target and each jump hop
+/// take credentials from DIFFERENT vaults (a shared bastion in the team vault + a personal
+/// identity in the personal vault) — see [`resolve_auth`], which resolves each
+/// method against its own vault, not a single shared one.
 #[derive(uniffi::Enum, Clone)]
 pub enum AuthMethod {
-    /// Ключом из волта (через встроенный агент).
+    /// By a key from the vault (via the embedded agent).
     Agent {
-        /// Волт, где лежит ключ-item.
+        /// The vault where the key item lives.
         vault_id: String,
-        /// Id ключа-item в волте.
+        /// Id of the key item in the vault.
         key_item_id: String,
     },
-    /// Паролем, введённым пользователем сейчас (в волте не хранится).
+    /// By a password entered by the user right now (not stored in the vault).
     Password {
-        /// Пароль. ⚠️ Остаточный риск границы FFI: UniFFI-`Enum` не умеет держать
-        /// поле в `Zeroizing`, поэтому эта `String` (и копия внутри russh) не
-        /// зануляется автоматически. На нашей стороне пароль переносится в
-        /// `Zeroizing` при сборке `ConnectOptions` ([`resolve_auth`]).
+        /// The password. ⚠️ Residual FFI-boundary risk: a UniFFI `Enum` cannot keep a
+        /// field in `Zeroizing`, so this `String` (and the copy inside russh) is not
+        /// zeroized automatically. On our side the password is moved into
+        /// `Zeroizing` when building `ConnectOptions` ([`resolve_auth`]).
         password: String,
     },
-    /// Паролем из волта (item типа «пароль»). Ядро расшифровывает его само в
-    /// момент коннекта; plaintext через FFI не проходит.
+    /// By a password from the vault (an item of type "password"). The core decrypts it itself at
+    /// connect time; the plaintext never passes through the FFI.
     VaultPassword {
-        /// Волт, где лежит пароль-item.
+        /// The vault where the password item lives.
         vault_id: String,
-        /// Id пароля-item в волте.
+        /// Id of the password item in the vault.
         password_item_id: String,
     },
 }
 
-/// Закреплённый host key (для экрана управления known_hosts).
+/// A pinned host key (for the known_hosts management screen).
 #[derive(uniffi::Record)]
 pub struct KnownHostInfo {
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Порт.
+    /// Port.
     pub port: u16,
-    /// Публичный host key (OpenSSH).
+    /// Public host key (OpenSSH).
     pub key: String,
-    /// Время закрепления (unix-сек).
+    /// Pin time (unix seconds).
     pub added_at: i64,
 }
 
-/// Итог импорта хостов из внешнего формата (PuTTY и т.п.).
+/// Result of importing hosts from an external format (PuTTY, etc.).
 #[derive(uniffi::Record)]
 pub struct HostImportReport {
-    /// id созданных профилей.
+    /// Ids of the created profiles.
     pub created_ids: Vec<String>,
-    /// Сколько записей пропущено (не SSH, нет хоста, коллизия id).
+    /// How many records were skipped (not SSH, no host, id collision).
     pub skipped: u32,
 }
 
-/// Итог импорта `~/.ssh/known_hosts`.
+/// Result of importing `~/.ssh/known_hosts`.
 #[derive(uniffi::Record)]
 pub struct KnownHostsImport {
-    /// Сколько (host, port) закреплено.
+    /// How many (host, port) were pinned.
     pub imported: u32,
-    /// Сколько строк пропущено как hashed (`|1|…` — необратимы, не привязать).
+    /// How many lines were skipped as hashed (`|1|…` — irreversible, cannot be pinned).
     pub skipped_hashed: u32,
-    /// Сколько строк пропущено как некорректные (нет ключа/не парсится).
+    /// How many lines were skipped as invalid (no key / does not parse).
     pub skipped_invalid: u32,
 }
 
-/// Описание jump-хоста для ProxyJump.
+/// Description of a jump host for ProxyJump.
 #[derive(uniffi::Record, Clone)]
 pub struct JumpHost {
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Порт.
+    /// Port.
     pub port: u16,
-    /// Пользователь.
+    /// User.
     pub user: String,
-    /// Аутентификация на jump-хосте (items — в том же волте, что и у целевого
-    /// хоста). В профиль сохраняются только ссылки (ключ/пароль из волта);
-    /// inline-`Password` допустим лишь при непосредственном подключении.
+    /// Authentication on the jump host (items are in the same vault as the target
+    /// host). Only references are saved into the profile (a key/password from the vault);
+    /// an inline `Password` is allowed only for a direct connection.
     pub auth: AuthMethod,
-    /// Host-chain (B2.2): если задан, хоп — ССЫЛКА на другой сохранённый профиль
-    /// (по неизменяемому uid, возможно в ДРУГОМ волте); его host/port/user/auth
-    /// резолвятся при коннекте, а inline-поля выше ИГНОРИРУЮТСЯ. Позволяет
-    /// переиспользовать бастион-профиль в цепочках без дублирования.
+    /// Host-chain (B2.2): if set, the hop is a REFERENCE to another saved profile
+    /// (by immutable uid, possibly in a DIFFERENT vault); its host/port/user/auth
+    /// are resolved at connect time, and the inline fields above are IGNORED. Lets you
+    /// reuse a bastion profile in chains without duplication.
     pub hop_ref: Option<HopRef>,
 }
 
-/// Ссылка host-chain на сохранённый профиль-бастион (B2.2). Резолвится в
-/// host/port/user/auth того профиля при коннекте (см. [`resolve_profile_by_uid`]).
+/// A host-chain reference to a saved bastion profile (B2.2). Resolves to the
+/// host/port/user/auth of that profile at connect time (see [`resolve_profile_by_uid`]).
 #[derive(uniffi::Record, Clone)]
 pub struct HopRef {
-    /// Волт, где лежит профиль-бастион.
+    /// The vault where the bastion profile lives.
     pub vault_id: String,
-    /// Неизменяемый uid профиля-бастиона (B2.1).
+    /// Immutable uid of the bastion profile (B2.1).
     pub profile_uid: String,
 }
 
-/// Результат выполнения SSH-команды.
+/// Result of executing an SSH command.
 #[derive(Debug, uniffi::Record)]
 pub struct SshExecResult {
-    /// stdout (как текст; невалидный UTF-8 заменяется).
+    /// stdout (as text; invalid UTF-8 is replaced).
     pub stdout: String,
     /// stderr.
     pub stderr: String,
-    /// Код возврата (или -1, если не получен).
+    /// Exit code (or -1 if not received).
     pub exit_status: i32,
 }
 
-/// Цель для multi-exec: один хост + ключ/джампы.
+/// A target for multi-exec: one host + key/jumps.
 #[derive(uniffi::Record)]
 pub struct MultiExecTarget {
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Порт.
+    /// Port.
     pub port: u16,
-    /// Пользователь.
+    /// User.
     pub user: String,
-    /// Способ аутентификации (несёт `vault_id` ключа/пароля; jump-хопы — свои).
+    /// Authentication method (carries the key/password `vault_id`; jump hops carry their own).
     pub auth: AuthMethod,
-    /// ProxyJump-цепочка (может быть пустой).
+    /// ProxyJump chain (may be empty).
     pub jumps: Vec<JumpHost>,
 }
 
-/// Категория нарушения структурной целостности БД (FFI-зеркало `ConsistencyKind`).
+/// Category of a structural DB-integrity violation (FFI mirror of `ConsistencyKind`).
 #[derive(Debug, uniffi::Enum, PartialEq, Eq)]
 pub enum DbConsistencyKind {
-    /// Item без записи волта.
+    /// An item with no vault record.
     OrphanItem,
-    /// Версия < 1.
+    /// Version < 1.
     BadVersion,
-    /// Длина `author_pubkey` != 32.
+    /// Length of `author_pubkey` != 32.
     BadAuthorLen,
-    /// Слишком короткая подпись.
+    /// Signature too short.
     BadSignatureLen,
-    /// Tombstone с непустым контентом.
+    /// A tombstone with non-empty content.
     TombstoneNotEmpty,
-    /// История версий для удалённого/отсутствующего item.
+    /// Version history for a deleted/missing item.
     StaleHistory,
 }
 
-/// Нарушение целостности БД (без секретов; идентификаторы — hex).
+/// A DB-integrity violation (no secrets; identifiers are hex).
 #[derive(Debug, uniffi::Record)]
 pub struct DbConsistencyIssue {
-    /// Категория.
+    /// Category.
     pub kind: DbConsistencyKind,
     /// vault_id (hex).
     pub vault_id_hex: String,
-    /// item_id (hex); пусто для проблем уровня волта.
+    /// item_id (hex); empty for vault-level problems.
     pub item_id_hex: String,
-    /// Машиночитаемая деталь.
+    /// Machine-readable detail.
     pub detail: String,
 }
 
-/// Отчёт структурной проверки БД инстанса (без секретов).
+/// Report of the instance DB's structural check (no secrets).
 #[derive(Debug, uniffi::Record)]
 pub struct DbConsistencyReport {
-    /// Целостность и инварианты соблюдены.
+    /// Integrity and invariants hold.
     pub ok: bool,
-    /// `PRAGMA integrity_check` прошёл.
+    /// `PRAGMA integrity_check` passed.
     pub integrity_ok: bool,
-    /// Найденные нарушения.
+    /// Violations found.
     pub issues: Vec<DbConsistencyIssue>,
 }
 
-/// Результат раскладки файла на один хост ([`Core::sftp_put_multi`]).
+/// Result of laying out a file onto one host ([`Core::sftp_put_multi`]).
 #[derive(uniffi::Record)]
 pub struct SftpPutResult {
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Ошибка, если запись не удалась (иначе `None`).
+    /// Error if the write failed (otherwise `None`).
     pub error: Option<String>,
 }
 
-/// Статус одного хоста broadcast-сессии (по индексу в `targets`).
+/// Status of one host in a broadcast session (by index in `targets`).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct BroadcastHostStatus {
-    /// Хост.
+    /// Host.
     pub host: String,
-    /// Индекс в исходном списке целей (совпадает с `host_index` в observer).
+    /// Index in the original target list (matches `host_index` in the observer).
     pub index: u32,
-    /// Установлена ли PTY-сессия.
+    /// Whether the PTY session was established.
     pub connected: bool,
-    /// Ошибка коннекта/открытия shell, если была.
+    /// Error connecting/opening the shell, if any.
     pub error: Option<String>,
 }
 
-/// Причина провала проверки целостности (FFI-зеркало `IntegrityFailure`).
+/// Reason an integrity check failed (FFI mirror of `IntegrityFailure`).
 #[derive(Debug, uniffi::Enum)]
 pub enum IntegrityFailureKind {
-    /// Подпись не сходится (порча блоба или повреждённый sig).
+    /// The signature does not verify (blob corruption or a damaged sig).
     SignatureInvalid,
-    /// `author_pubkey` не совпал с владельцем волта (подмена автора).
+    /// `author_pubkey` did not match the vault owner (author spoofing).
     AuthorMismatch,
-    /// Структурно некорректные автор/подпись.
+    /// Structurally invalid author/signature.
     Malformed,
 }
 
-/// Проблемная запись в отчёте целостности (без секретов).
+/// A problematic record in the integrity report (no secrets).
 #[derive(Debug, uniffi::Record)]
 pub struct IntegrityIssueInfo {
-    /// `item_id` (UTF-8 lossy); пустая строка — проблема самой vault-записи.
+    /// `item_id` (UTF-8 lossy); an empty string is a problem with the vault record itself.
     pub item_id: String,
-    /// Версия записи.
+    /// Record version.
     pub version: u64,
-    /// Tombstone ли это.
+    /// Whether this is a tombstone.
     pub tombstone: bool,
-    /// Причина.
+    /// Reason.
     pub failure: IntegrityFailureKind,
 }
 
-/// Отчёт аудита целостности волта (read-only, без plaintext/секретов).
+/// Vault integrity-audit report (read-only, no plaintext/secrets).
 #[derive(Debug, uniffi::Record)]
 pub struct VaultIntegrityReport {
-    /// Все записи (включая tombstones) прошли проверку.
+    /// All records (including tombstones) passed the check.
     pub ok: bool,
-    /// Сколько записей проверено.
+    /// How many records were checked.
     pub checked: u64,
-    /// Проблемные записи.
+    /// Problematic records.
     pub issues: Vec<IntegrityIssueInfo>,
 }
 
-/// Группа хостов: именованный набор ссылок на профили и/или вложенные группы в
-/// том же волте. Обслуживает организацию (дерево папок через `parent_id`) и
-/// операции (резолв членов → multi-exec). Это не RBAC — группа не несёт прав.
+/// A host group: a named set of references to profiles and/or nested groups in
+/// the same vault. Serves organization (a folder tree via `parent_id`) and
+/// operations (resolving members → multi-exec). This is not RBAC — a group carries no rights.
 #[derive(uniffi::Record, Clone)]
 pub struct ServerGroup {
-    /// Идентификатор группы (item_id в волте).
+    /// Group identifier (item_id in the vault).
     pub group_id: String,
-    /// Человекочитаемая метка.
+    /// Human-readable label.
     pub label: String,
-    /// Члены: id профилей-соединений или id вложенных групп (того же волта).
+    /// Members: ids of connection profiles or ids of nested groups (of the same vault).
     pub member_ids: Vec<String>,
-    /// Родительская группа для дерева папок в UI (`None` = корень).
+    /// Parent group for the folder tree in the UI (`None` = root).
     pub parent_id: Option<String>,
 }
 
-/// Сериализуемое тело группы. Только ссылки, никаких кред. `color` — открытое
-/// UI-поле; новые поля добавляются с `#[serde(default)]` (forward-compat).
+/// Serializable group body. References only, no credentials. `color` is a public
+/// UI field; new fields are added with `#[serde(default)]` (forward-compat).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredGroup {
     label: String,
@@ -844,70 +844,70 @@ struct StoredGroup {
     color: Option<String>,
 }
 
-/// Статус разрешения члена группы (для dry-run и диагностики).
+/// Resolution status of a group member (for dry-run and diagnostics).
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResolveStatus {
-    /// Член — существующий профиль, цель построена.
+    /// The member is an existing profile; the target was built.
     Ok,
-    /// Ссылка не указывает ни на профиль, ни на группу (удалён/опечатка).
+    /// The reference points to neither a profile nor a group (deleted/typo).
     Dangling,
-    /// Член — пароль из волта неизвестен заранее (`PromptPassword`); потребует
-    /// ввода при коннекте, в пакетный прогон не годится без интерактива.
+    /// The member's vault password is not known in advance (`PromptPassword`); it will require
+    /// input at connect time and is unsuitable for a batch run without interaction.
     PromptPassword,
-    /// Член-группа уже посещена (цикл) либо превышен лимит глубины — пропущен.
+    /// The member group was already visited (a cycle) or the depth limit was exceeded — skipped.
     CycleSkipped,
-    /// Член — Personal-хост: логин личной идентичностью требует per-host
-    /// резолва привязки + анти-редирект-проверки, что в fan-out пока не
-    /// поддержано (B6). НЕ подключаем с пустым паролем — исключаем из пакета.
+    /// The member is a Personal host: logging in with a personal identity requires per-host
+    /// binding resolution + an anti-redirect check, which is not yet supported in fan-out
+    /// (B6). We do NOT connect with an empty password — it is excluded from the batch.
     Personal,
 }
 
-/// Развёрнутая цель группы в dry-run: что зарезолвилось и с каким статусом, без
-/// коннекта/загрузки ключей/расшифровки паролей.
+/// An expanded group target in a dry-run: what resolved and with which status, without
+/// connecting/loading keys/decrypting passwords.
 #[derive(uniffi::Record)]
 pub struct GroupTargetPlan {
-    /// Id профиля-члена (или проблемной ссылки).
+    /// Id of the member profile (or of the problematic reference).
     pub member_id: String,
-    /// Хост (пусто, если не зарезолвилось).
+    /// Host (empty if not resolved).
     pub host: String,
-    /// Порт.
+    /// Port.
     pub port: u16,
-    /// Пользователь.
+    /// User.
     pub user: String,
-    /// Статус разрешения.
+    /// Resolution status.
     pub status: ResolveStatus,
 }
 
-/// Результат multi-exec по одному хосту.
+/// Result of multi-exec for a single host.
 #[derive(uniffi::Record)]
 pub struct MultiExecResult {
-    /// Хост.
+    /// Host.
     pub host: String,
     /// stdout.
     pub stdout: String,
     /// stderr.
     pub stderr: String,
-    /// Код возврата (или -1).
+    /// Exit code (or -1).
     pub exit_status: i32,
-    /// Ошибка коннекта/выполнения, если была (тогда остальные поля пусты).
+    /// Error connecting/executing, if any (in which case the other fields are empty).
     pub error: Option<String>,
-    /// Длительность фазы выполнения команды (мс). Для ошибок коннекта — 0.
+    /// Duration of the command-execution phase (ms). 0 for connect errors.
     pub duration_ms: u64,
-    /// Команда не уложилась в per-host таймаут (`timeout_secs`). Тогда `error`
-    /// тоже выставлен, а `exit_status == -1`.
+    /// The command exceeded the per-host timeout (`timeout_secs`). In that case `error`
+    /// is also set and `exit_status == -1`.
     pub timed_out: bool,
 }
 
-// === Веха-2: FFI-типы (cloud/membership/identity/cache/audit/sync) ===
+// === Milestone 2: FFI types (cloud/membership/identity/cache/audit/sync) ===
 
-/// Роль члена волта (FFI-зеркало `storage::MemberRole`).
+/// A vault member's role (FFI mirror of `storage::MemberRole`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiMemberRole {
-    /// Только чтение.
+    /// Read-only.
     Viewer,
-    /// Чтение и запись items.
+    /// Read and write items.
     Editor,
-    /// Управление членством (выдача/отзыв, ротация).
+    /// Membership management (grant/revoke, rotation).
     Admin,
 }
 
@@ -924,18 +924,18 @@ impl FfiMemberRole {
             MemberRole::Viewer => FfiMemberRole::Viewer,
             MemberRole::Editor => FfiMemberRole::Editor,
             MemberRole::Admin => FfiMemberRole::Admin,
-            // non_exhaustive: будущая роль → консервативно Viewer (минимум прав).
+            // non_exhaustive: a future role → conservatively Viewer (minimum rights).
             _ => FfiMemberRole::Viewer,
         }
     }
 }
 
-/// Политика кэширования волта (FFI-зеркало `storage::CachePolicy`, server-tz §6.6).
+/// A vault's cache policy (FFI mirror of `storage::CachePolicy`, server-tz §6.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiCachePolicy {
-    /// Разрешён оффлайн-доступ (слабее отзыв).
+    /// Offline access allowed (weaker revocation).
     OfflineAllowed,
-    /// Только онлайн (сильный отзыв, нет оффлайна).
+    /// Online only (strong revocation, no offline).
     OnlineOnly,
 }
 
@@ -955,66 +955,66 @@ impl FfiCachePolicy {
     }
 }
 
-/// Член волта для UI: публичные ключи (hex) + роль + fingerprint. Секретов нет.
+/// A vault member for the UI: public keys (hex) + role + fingerprint. No secrets.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MemberInfo {
-    /// Ed25519-pubkey члена (member-id) в hex.
+    /// The member's Ed25519 pubkey (member-id) in hex.
     pub ed25519_pub_hex: String,
-    /// Роль.
+    /// Role.
     pub role: FfiMemberRole,
-    /// OOB-fingerprint (hex(SHA-256(ed25519_pub)), 64 символа) для подтверждения.
+    /// OOB fingerprint (hex(SHA-256(ed25519_pub)), 64 characters) for confirmation.
     pub fingerprint: String,
 }
 
-/// Оставшийся член при ротации VK: публичные ключи (hex) + роль.
+/// A remaining member during VK rotation: public keys (hex) + role.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RemainingMember {
     /// Ed25519-pubkey (member-id), hex.
     pub ed25519_pub_hex: String,
-    /// X25519-pubkey (получатель обёртки VK'), hex.
+    /// X25519 pubkey (recipient of the VK' wrap), hex.
     pub x25519_pub_hex: String,
-    /// Роль.
+    /// Role.
     pub role: FfiMemberRole,
 }
 
-/// Один элемент дельты синка, который foreign-транспорт отдаёт ядру.
-/// `object` — непрозрачные байты сериализованного sync-объекта.
+/// One element of a sync delta that the foreign transport hands to the core.
+/// `object` — opaque bytes of a serialized sync object.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct SyncDeltaItem {
-    /// server_seq, назначенный сервером (НЕ доверенный — движок верифицирует).
+    /// server_seq assigned by the server (NOT trusted — the engine verifies).
     pub server_seq: u64,
-    /// Сериализованный объект (непрозрачные зашифрованные/подписанные байты).
+    /// The serialized object (opaque encrypted/signed bytes).
     pub object: Vec<u8>,
 }
 
-/// Отчёт синка для UI (FFI-зеркало `sync::SyncReport`; без секретов).
+/// Sync report for the UI (FFI mirror of `sync::SyncReport`; no secrets).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiSyncReport {
-    /// Сколько объектов применено (merged).
+    /// How many objects were applied (merged).
     pub applied: u64,
-    /// Сколько пропущено как stale/откат версии.
+    /// How many were skipped as stale/a version rollback.
     pub skipped_stale: u64,
-    /// Сколько конфликтов равной версии (локальное не тронуто).
+    /// How many equal-version conflicts (local left untouched).
     pub conflicts: u32,
-    /// Сколько недоверенных объектов отклонено (verify/floor/cursor fail).
+    /// How many untrusted objects were rejected (verify/floor/cursor fail).
     pub rejected: u32,
-    /// Сколько объектов отдано на push.
+    /// How many objects were handed off for push.
     pub pushed: u64,
 }
 
-/// Запись аудита для UI (FFI-зеркало `storage::AuditEntry`; блобы непрозрачны).
+/// Audit entry for the UI (FFI mirror of `storage::AuditEntry`; blobs are opaque).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiAuditEntry {
-    /// Монотонный seq (присвоен storage; открытая метадата, не доверенная для
-    /// tamper-evidence в v1).
+    /// Monotonic seq (assigned by storage; public metadata, not trusted for
+    /// tamper-evidence in v1).
     pub seq: u64,
-    /// Подписанное событие (непрозрачный блоб слоя выше).
+    /// The signed event (an opaque blob from a higher layer).
     pub entry_blob: Vec<u8>,
-    /// Подпись автора (Ed25519-блоб).
+    /// Author's signature (an Ed25519 blob).
     pub signature: Vec<u8>,
-    /// Публичный ключ автора (hex).
+    /// Author's public key (hex).
     pub author_pubkey_hex: String,
-    /// Когда записано (unix-сек).
+    /// When recorded (unix seconds).
     pub recorded_at: i64,
 }
 
@@ -1022,25 +1022,25 @@ struct CoreState {
     storage: Storage,
     keyset: unissh_keychain::UnlockedKeyset,
     agent: InMemoryAgent,
-    /// Кэш расшифрованных имён волтов (vault_id → name), чтобы `list_vaults` не
-    /// делал HPKE-разворот VK для каждого волта при каждом вызове.
+    /// Cache of decrypted vault names (vault_id → name), so that `list_vaults` does not
+    /// perform an HPKE VK unwrap for every vault on every call.
     vault_names: HashMap<Vec<u8>, String>,
 }
 
-/// Корневой объект ядра для UI. Управляет одним локальным инстансом.
+/// Root core object for the UI. Manages a single local instance.
 #[derive(uniffi::Object)]
 pub struct Core {
     db_path: PathBuf,
     keyset_path: PathBuf,
-    // Arc — чтобы разделить распакованное состояние с ReconnectingSession
-    // (переподключение требует доступа к keyset/storage/agent).
+    // Arc — to share the unwrapped state with ReconnectingSession
+    // (reconnection needs access to the keyset/storage/agent).
     state: Arc<Mutex<Option<CoreState>>>,
     rt: Arc<tokio::runtime::Runtime>,
 }
 
 #[uniffi::export]
 impl Core {
-    /// Создаёт фасад поверх путей БД и сайдкара keyset (ещё не разблокирован).
+    /// Creates the facade over the DB and keyset-sidecar paths (not yet unlocked).
     #[uniffi::constructor]
     pub fn new(db_path: String, keyset_path: String) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Core {
@@ -1056,11 +1056,11 @@ impl Core {
         })
     }
 
-    /// Заводит новый аккаунт (первое устройство). Возвращает Secret Key (hex) для
-    /// Emergency Kit — показать пользователю **один раз**. `password = None` →
-    /// беспарольный режим (SSO/trusted devices).
+    /// Creates a new account (the first device). Returns the Secret Key (hex) for
+    /// the Emergency Kit — show it to the user **once**. `password = None` →
+    /// passwordless mode (SSO/trusted devices).
     pub fn create_account(&self, password: Option<String>) -> Result<String, FfiError> {
-        // Защита от перезаписи существующего инстанса (иначе — необратимая потеря БД).
+        // Guards against overwriting an existing instance (otherwise — irreversible DB loss).
         if self.keyset_path.exists() || self.db_path.exists() {
             return Err(FfiError::AlreadyExists);
         }
@@ -1073,9 +1073,9 @@ impl Core {
         .map_err(FfiError::other)?;
         let enc_bytes = enc.to_bytes().map_err(FfiError::other)?;
 
-        // Порядок важен (защита от «кирпича»): сначала открываем БД, и только при
-        // успехе пишем keyset-сайдкар — атомарно (O_EXCL). При любом сбое после
-        // создания БД откатываем файлы, чтобы повторная попытка была чистой.
+        // Order matters (brick protection): first open the DB, and only on
+        // success write the keyset sidecar — atomically (O_EXCL). On any failure after
+        // creating the DB we roll back the files so that a retry starts clean.
         let db_key = derive_db_key(&unlocked);
         let storage = Storage::open(&self.db_path, &db_key[..]).map_err(|e| {
             let _ = std::fs::remove_file(&self.db_path);
@@ -1093,8 +1093,8 @@ impl Core {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Гонка: keyset появился между проверкой и записью. БД мы только что
-                // создали сами — убираем её, чужой инстанс не трогаем.
+                // Race: the keyset appeared between the check and the write. We just
+                // created the DB ourselves — remove it, and don't touch the other instance.
                 drop(storage);
                 let _ = std::fs::remove_file(&self.db_path);
                 return Err(FfiError::AlreadyExists);
@@ -1113,13 +1113,13 @@ impl Core {
             vault_names: HashMap::new(),
         });
         log::info!("instance created (password-protected: {has_password})");
-        // Emergency Kit: промежуточную копию hex зануляем; возвращаемая через FFI
-        // строка вне нашего контроля (ограничение границы FFI).
+        // Emergency Kit: we zeroize the intermediate hex copy; the string returned through the FFI
+        // is beyond our control (an FFI-boundary limitation).
         let kit = Zeroizing::new(hex::encode(secret_key.expose_bytes()));
         Ok(kit.as_str().to_string())
     }
 
-    /// Разблокирует инстанс паролем (если нужен) и Secret Key (hex из Emergency Kit).
+    /// Unlocks the instance with a password (if needed) and the Secret Key (hex from the Emergency Kit).
     pub fn unlock(&self, password: Option<String>, secret_key_hex: String) -> Result<(), FfiError> {
         let password = password.map(Zeroizing::new);
         let secret_key_hex = Zeroizing::new(secret_key_hex);
@@ -1131,10 +1131,10 @@ impl Core {
         let secret_key =
             SecretKey::from_slice(&sk_bytes).map_err(|_| FfiError::InvalidCredentials)?;
 
-        // migrate-on-open: keyset, записанный старой схемой (до round 2), открывается
-        // пробой и возвращается переобёрнутым под текущую схему (`migrated`). Это
-        // чинит «неверный секретный ключ/мастер-пароль» у тех, кто создал аккаунт на
-        // прошлых сборках. Персист переобёртки — ниже, ПОСЛЕ open storage и проверки пола.
+        // migrate-on-open: a keyset written by an old scheme (before round 2) is opened
+        // via a probe and returned re-wrapped under the current scheme (`migrated`). This
+        // fixes "invalid secret key/master password" for those who created an account on
+        // earlier builds. Persisting the re-wrap is below, AFTER opening storage and the floor check.
         let (unlocked, migrated) =
             unlock_account_migrating(&enc, password.as_deref().map(|s| s.as_bytes()), &secret_key)
                 .map_err(|e| match e {
@@ -1148,12 +1148,12 @@ impl Core {
         let db_key = derive_db_key(&unlocked);
         let storage = Storage::open(&self.db_path, &db_key[..]).map_err(FfiError::other)?;
 
-        // anti-rollback (server-tz §13.13b): локальный сайдкар тоже под защитой пола.
-        // Атакующий с доступом к диску может подменить keyset-файл СТАРЫМ
-        // (понижённой generation) блобом — после смены пароля это downgrade. Та же
-        // логика, что в unlock_from_server_blob: ОТВЕРГАЕМ generation ниже пола ДО
-        // установки состояния (пол живёт в storage-meta, доступен только после
-        // unlock+open). Пол читаем/поднимаем тем же keychain-хелпером.
+        // anti-rollback (server-tz §13.13b): the local sidecar is also under floor protection.
+        // An attacker with disk access could swap the keyset file for an OLD
+        // (lower-generation) blob — after a password change that is a downgrade. The same
+        // logic as in unlock_from_server_blob: we REJECT a generation below the floor BEFORE
+        // setting state (the floor lives in storage-meta, available only after
+        // unlock+open). We read/raise the floor with the same keychain helper.
         let floor = unissh_keychain::keyset_gen_floor(&storage)
             .map_err(map_keychain_err)?
             .unwrap_or(0);
@@ -1168,13 +1168,13 @@ impl Core {
                 unissh_keychain::KeychainError::GenerationRollback { attempted, floor },
             ));
         }
-        // Порядок защищён от кирпича: сперва атомарно персистим переобёрнутый keyset,
-        // и ТОЛЬКО потом поднимаем пол до его (новой, +1) generation. При сбое записи
-        // пол не поднимается — старый блоб (generation=attempted) ещё откроется на
-        // следующем запуске и миграция повторится. После успеха старый блоб уходит
-        // под пол — downgrade на старую/слабую схему больше не пройдёт.
+        // The order is brick-safe: first atomically persist the re-wrapped keyset,
+        // and ONLY then raise the floor to its (new, +1) generation. If the write fails
+        // the floor is not raised — the old blob (generation=attempted) will still open on
+        // the next launch and the migration will repeat. On success the old blob drops
+        // below the floor — a downgrade to the old/weaker scheme will no longer pass.
         let accepted_gen = if let Some(new_enc) = migrated {
-            // Бэкап старого сайдкара перед перезаписью (логирует путь) — обратимость.
+            // Back up the old sidecar before overwriting (logs the path) — reversibility.
             backup_keyset_sidecar(&self.keyset_path);
             let new_bytes = new_enc.to_bytes().map_err(FfiError::other)?;
             write_keyset_atomic(&self.keyset_path, &new_bytes)?;
@@ -1187,7 +1187,7 @@ impl Core {
         } else {
             attempted
         };
-        // Принято: поднять пол до принятой generation (TOFU; понизить нельзя — идемпотентно).
+        // Accepted: raise the floor to the accepted generation (TOFU; cannot lower — idempotent).
         unissh_keychain::raise_keyset_gen_floor(&storage, accepted_gen)
             .map_err(map_keychain_err)?;
 
@@ -1201,30 +1201,30 @@ impl Core {
         Ok(())
     }
 
-    /// Разблокирован ли инстанс.
+    /// Whether the instance is unlocked.
     pub fn is_unlocked(&self) -> bool {
         self.locked_state().is_some()
     }
 
-    /// Нужен ли мастер-пароль для разблокировки инстанса на диске. Читает только
-    /// заголовок keyset-сайдкара (KDF-параметры есть ⇔ режим Password) — без
-    /// открытия БД и без доступа к секретам. `None`, если keyset ещё нет или его
-    /// не удалось прочитать/разобрать. Позволяет UI честно показать, что
-    /// авто-разблокировка «открыт при старте» применима только к беспарольным
-    /// инстансам (пароль нигде не хранится).
+    /// Whether a master password is needed to unlock the on-disk instance. Reads only
+    /// the keyset-sidecar header (KDF params present ⇔ Password mode) — without
+    /// opening the DB and without access to secrets. `None` if there is no keyset yet or it
+    /// could not be read/parsed. Lets the UI honestly show that
+    /// the "open at startup" auto-unlock applies only to passwordless
+    /// instances (the password is stored nowhere).
     pub fn instance_requires_password(&self) -> Option<bool> {
         let bytes = std::fs::read(&self.keyset_path).ok()?;
         let enc = EncryptedKeyset::from_bytes(&bytes).ok()?;
         Some(enc.kdf_params.is_some())
     }
 
-    /// Блокирует инстанс (секреты в памяти зануляются при Drop).
+    /// Locks the instance (in-memory secrets are zeroized on Drop).
     pub fn lock(&self) {
         log::info!("instance locked");
         *self.locked_state() = None;
     }
 
-    /// Создаёт локальный волт.
+    /// Creates a local vault.
     pub fn create_vault(&self, vault_id: String, name: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -1235,14 +1235,14 @@ impl Core {
         Ok(())
     }
 
-    /// Создаёт **cloud-волт** (server-tz §4.2): `vault_id` = случайный UUIDv4
-    /// (`vault::new_vault_id`), `SyncTarget::Cloud`, **привязанный к серверу**
-    /// `tenant_b64` (1:1-binding). `tenant_b64` — base64-`tenant_id` активного
-    /// сервера (как в `ServerConfig.tenant_id`); хранится как непрозрачная метка
-    /// маршрутизации, по которой `sync_now` решает, на какой сервер пушить волт.
-    /// Пустой `tenant_b64` отвергается (клиент обязан передать активный сервер).
-    /// Возвращает `vault_id` как hex-строку (UUIDv4 — не-UTF8 байты; cloud-методы
-    /// принимают hex).
+    /// Creates a **cloud vault** (server-tz §4.2): `vault_id` = a random UUIDv4
+    /// (`vault::new_vault_id`), `SyncTarget::Cloud`, **bound to the server**
+    /// `tenant_b64` (a 1:1 binding). `tenant_b64` is the base64 `tenant_id` of the active
+    /// server (as in `ServerConfig.tenant_id`); stored as an opaque routing
+    /// label by which `sync_now` decides which server to push the vault to.
+    /// An empty `tenant_b64` is rejected (the client must pass an active server).
+    /// Returns `vault_id` as a hex string (a UUIDv4 is non-UTF8 bytes; cloud methods
+    /// accept hex).
     pub fn create_cloud_vault(&self, name: String, tenant_b64: String) -> Result<String, FfiError> {
         if tenant_b64.is_empty() {
             return Err(FfiError::Other {
@@ -1260,9 +1260,9 @@ impl Core {
             SyncTarget::Cloud,
         )
         .map_err(map_vault_err)?;
-        // Привязываем ТОЛЬКО свежесозданный волт по его vault_id (1:1), чтобы не
-        // задеть чужие непривязанные legacy cloud-волты (они должны привязаться к
-        // своему серверу, а не к этому).
+        // Bind ONLY the freshly created vault by its vault_id (1:1), so as not to
+        // affect other unbound legacy cloud vaults (they must be bound to
+        // their own server, not this one).
         state
             .storage
             .set_vault_tenant(&vid, tenant_b64.as_bytes())
@@ -1272,11 +1272,11 @@ impl Core {
         Ok(vid_hex)
     }
 
-    /// **Одноразовая привязка legacy cloud-волтов к серверу** (1:1-binding миграция):
-    /// проставляет `tenant_b64` каждому облачному волту с пустым `sync_tenant`
-    /// (созданному до multi-server). Клиент вызывает это РОВНО когда привязан
-    /// единственный сервер — иначе можно привязать не к тому. Идемпотентно
-    /// (уже-привязанные волты не трогаются). Возвращает число привязанных волтов.
+    /// **One-time binding of legacy cloud vaults to a server** (a 1:1-binding migration):
+    /// sets `tenant_b64` on every cloud vault with an empty `sync_tenant`
+    /// (created before multi-server). The client calls this EXACTLY when a single
+    /// server is bound — otherwise it could bind to the wrong one. Idempotent
+    /// (already-bound vaults are left untouched). Returns the number of vaults bound.
     pub fn bind_unbound_cloud_vaults(&self, tenant_b64: String) -> Result<u32, FfiError> {
         if tenant_b64.is_empty() {
             return Err(FfiError::Other {
@@ -1292,9 +1292,9 @@ impl Core {
         Ok(n as u32)
     }
 
-    /// Снять привязку у всех cloud-волтов, привязанных к `tenant_b64` (напр. при
-    /// удалении сервера) — они становятся unbound и могут быть привязаны заново
-    /// (через re-link или ручную привязку). Возвращает число затронутых волтов.
+    /// Unbind all cloud vaults bound to `tenant_b64` (e.g. when
+    /// removing a server) — they become unbound and can be rebound
+    /// (via re-link or a manual binding). Returns the number of vaults affected.
     pub fn clear_cloud_vault_binding(&self, tenant_b64: String) -> Result<u32, FfiError> {
         if tenant_b64.is_empty() {
             return Ok(0);
@@ -1308,8 +1308,8 @@ impl Core {
         Ok(n as u32)
     }
 
-    /// Привязать ОДИН cloud-волт (по hex `vault_id`) к серверу `tenant_b64` (1:1).
-    /// Для ручной привязки unbound-волта к выбранному серверу из UI.
+    /// Bind ONE cloud vault (by hex `vault_id`) to the server `tenant_b64` (1:1).
+    /// For manually binding an unbound vault to a chosen server from the UI.
     pub fn bind_cloud_vault(&self, vault_id: String, tenant_b64: String) -> Result<(), FfiError> {
         if tenant_b64.is_empty() {
             return Err(FfiError::Other {
@@ -1326,10 +1326,10 @@ impl Core {
         Ok(())
     }
 
-    /// Добавляет/повышает члена cloud-волта (server-tz §5): расширяет набор
-    /// последней эпохи на `(member_ed25519_pub, role)` и выпускает обёртку VK под
-    /// `member_x25519_pub`. Владелец остаётся `Admin`. Ключи — hex (публичный
-    /// материал, не секрет). `vault_id` — hex (cloud UUIDv4).
+    /// Adds/promotes a member of a cloud vault (server-tz §5): extends the set
+    /// of the latest epoch with `(member_ed25519_pub, role)` and issues a VK wrap under
+    /// `member_x25519_pub`. The owner stays `Admin`. Keys are hex (public
+    /// material, not a secret). `vault_id` is hex (a cloud UUIDv4).
     pub fn add_member(
         &self,
         vault_id: String,
@@ -1345,10 +1345,10 @@ impl Core {
         let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
         let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
 
-        // Владелец ВСЕГДА Admin своего волта. «Добавление» владельца как члена ниже
-        // по upsert-пути пере-вставило бы его с переданной ролью (напр. Viewer); как
-        // только `verify_record_authority` требует `can_write`, волт становится
-        // нечитаем для собственного владельца (необратимый брик). Отвергаем явно.
+        // The owner is ALWAYS Admin of their own vault. "Adding" the owner as a member below
+        // via the upsert path would re-insert them with the passed role (e.g. Viewer); as
+        // soon as `verify_record_authority` requires `can_write`, the vault becomes
+        // unreadable for its own owner (an irreversible brick). We reject explicitly.
         if member_ed == owner_ed {
             return Err(FfiError::other(
                 "cannot add the vault owner as a member — the owner is always Admin",
@@ -1357,7 +1357,7 @@ impl Core {
 
         let vault = Vault::open(&state.storage, &state.keyset, &vid).map_err(map_vault_err)?;
 
-        // целевой набор = текущий (если есть manifest) ∪ {owner Admin, новый член}.
+        // target set = current (if a manifest exists) ∪ {owner Admin, new member}.
         let mut members: Vec<Member> = match state
             .storage
             .latest_membership_epoch(&vid)
@@ -1369,14 +1369,14 @@ impl Core {
                 .to_vec(),
             None => Vec::new(),
         };
-        // гарантируем owner=Admin в наборе
+        // ensure owner=Admin is in the set
         if !members.iter().any(|m| m.ed25519_pub == owner_ed) {
             members.push(Member {
                 ed25519_pub: owner_ed.clone(),
                 role: MemberRole::Admin,
             });
         }
-        // upsert нового члена (его роль)
+        // upsert the new member (their role)
         members.retain(|m| m.ed25519_pub != member_ed);
         members.push(Member {
             ed25519_pub: member_ed.clone(),
@@ -1390,8 +1390,8 @@ impl Core {
         Ok(())
     }
 
-    /// Список членов cloud-волта на последней эпохе (публичные ключи + роль +
-    /// fingerprint). Пусто, если членства ещё нет.
+    /// List of a cloud vault's members at the latest epoch (public keys + role +
+    /// fingerprint). Empty if there is no membership yet.
     pub fn list_members(&self, vault_id: String) -> Result<Vec<MemberInfo>, FfiError> {
         let vid = decode_vid(&vault_id)?;
         let mut guard = self.locked_state();
@@ -1418,16 +1418,16 @@ impl Core {
             .collect())
     }
 
-    /// OOB-fingerprint Ed25519-pubkey члена (hex(SHA-256), 64 символа) — для
-    /// показа/сверки в UI (как Bitwarden Confirm / 1Password fingerprint).
+    /// OOB fingerprint of a member's Ed25519 pubkey (hex(SHA-256), 64 characters) — for
+    /// display/verification in the UI (like Bitwarden Confirm / 1Password fingerprint).
     pub fn member_fingerprint(&self, ed25519_pub: String) -> Result<String, FfiError> {
         let ed = decode_pubkey32("ed25519_pub", &ed25519_pub)?;
         Ok(member_fingerprint(&ed))
     }
 
-    /// Подтверждает (пиннит TOFU) pubkey члена под `account_id` (server-tz §5.2):
-    /// первый раз — пиннится; повторно тем же ключом — ок; другим → ошибка
-    /// (`PinMismatch`, защита от подмены pubkey сервером). Требует unlock (storage).
+    /// Confirms (TOFU-pins) a member's pubkey under `account_id` (server-tz §5.2):
+    /// the first time it is pinned; repeating with the same key — ok; with a different one → an error
+    /// (`PinMismatch`, protection against pubkey spoofing by the server). Requires unlock (storage).
     pub fn confirm_member_pin(
         &self,
         account_id: String,
@@ -1439,12 +1439,12 @@ impl Core {
         pin_and_verify_member(&state.storage, account_id.as_bytes(), &ed).map_err(map_vault_err)
     }
 
-    /// Подтверждает (пиннит TOFU) genesis-owner (creator-pubkey) волта, созданного
-    /// тиммейтом — share-accept (A0): без этого пина запись чужого волта не проходит
-    /// authority-верификацию на синке (якорь = локальный keyset). Первый раз —
-    /// пиннится; повторно тем же ключом — ок; другим → `PinMismatch` (защита от
-    /// тихого ре-биндинга vault→owner сервером). `ed25519_pub` — creator-pubkey,
-    /// полученный OOB и сверенный по отпечатку (`member_fingerprint`). Требует unlock.
+    /// Confirms (TOFU-pins) the genesis owner (creator-pubkey) of a vault created
+    /// by a teammate — share-accept (A0): without this pin another's vault record fails
+    /// authority verification on sync (the anchor = the local keyset). The first time it is
+    /// pinned; repeating with the same key — ok; with a different one → `PinMismatch` (protection against
+    /// a silent vault→owner re-binding by the server). `ed25519_pub` is the creator-pubkey,
+    /// received OOB and verified by fingerprint (`member_fingerprint`). Requires unlock.
     pub fn pin_vault_genesis_owner(
         &self,
         vault_id: String,
@@ -1454,9 +1454,9 @@ impl Core {
         let ed = decode_pubkey32("ed25519_pub", &ed25519_pub)?;
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
-        // Якорь пиннится ТОЛЬКО для чужих (teammate) волтов. Свой keyset как
-        // «genesis-owner тиммейта» — почти наверняка ошибка/мис-анкоринг: собственные
-        // волты и так авторизуются локальным keyset (фолбэк). Отвергаем явно.
+        // The anchor is pinned ONLY for others' (teammate) vaults. Pinning your own keyset as
+        // a "teammate's genesis owner" is almost certainly a mistake/mis-anchoring: your own
+        // vaults are authorized by the local keyset anyway (the fallback). We reject explicitly.
         if ed == state.keyset.signing.verifying.to_bytes() {
             return Err(FfiError::Other {
                 msg: "cannot pin your own keyset as a vault trust anchor".into(),
@@ -1465,22 +1465,22 @@ impl Core {
         pin_and_verify_vault_anchor(&state.storage, &vid, &ed).map_err(map_vault_err)
     }
 
-    /// Назначает ЛИЧНЫЙ волт аккаунта (A3.2): указатель хранится в per-account
-    /// состоянии (self-sealed payload, синкается на устройства аккаунта). `vault_id`
-    /// — hex cloud-волта ИЛИ произвольный UTF-8-id локального (оффлайн) волта:
-    /// личный волт может быть и полностью локальным (самый приватный вариант —
-    /// идентичности не покидают устройство). Требует unlock. Инкрементит версию.
+    /// Assigns the account's PERSONAL vault (A3.2): the pointer is stored in per-account
+    /// state (a self-sealed payload, synced to the account's devices). `vault_id`
+    /// is the hex of a cloud vault OR an arbitrary UTF-8 id of a local (offline) vault:
+    /// the personal vault may also be fully local (the most private option —
+    /// identities never leave the device). Requires unlock. Increments the version.
     ///
-    /// Guard (B5.3): личный волт должен быть single-member — в него пишутся
-    /// идентичности и привязки, а расшаренный (multi-member) волт синкает их всей
-    /// команде (утечка личных кредов + факта/цели привязки). >1 члена → отказ;
-    /// у локального волта membership-цепочки нет (0 членов) → проходит.
+    /// Guard (B5.3): the personal vault must be single-member — identities and
+    /// bindings are written into it, and a shared (multi-member) vault would sync them to the whole
+    /// team (a leak of personal credentials + the fact/target of the binding). >1 member → refused;
+    /// a local vault has no membership chain (0 members) → passes.
     pub fn set_personal_vault(&self, vault_id: String) -> Result<(), FfiError> {
         let vid = {
             let mut guard = self.locked_state();
             let state = guard.as_mut().ok_or(FfiError::Locked)?;
-            // resolve_vid принимает и локальный (UTF-8), и cloud (hex) id; decode_vid
-            // был hex-only и отвергал локальные волты.
+            // resolve_vid accepts both a local (UTF-8) and a cloud (hex) id; decode_vid
+            // was hex-only and rejected local vaults.
             let vid = resolve_vid(&state.storage, &vault_id);
             let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
             let members = match state
@@ -1492,7 +1492,7 @@ impl Core {
                     .map_err(map_vault_err)?
                     .members()
                     .len(),
-                None => 0, // локальный / ещё-не-расшаренный волт — членов нет
+                None => 0, // a local / not-yet-shared vault — no members
             };
             if members > 1 {
                 return Err(FfiError::other(
@@ -1500,20 +1500,20 @@ impl Core {
                 ));
             }
             vid
-        }; // guard освобождён до update_account_state (он лочит state сам)
+        }; // the guard is released before update_account_state (which locks state itself)
         self.update_account_state(move |p| p.personal_vault_id = vid)
     }
 
-    /// Account-default username (A3.2): используется в резолве логина, когда у хоста
-    /// нет своего. Пустая строка очищает. Требует unlock.
+    /// Account-default username (A3.2): used in login resolution when a host
+    /// has none of its own. An empty string clears it. Requires unlock.
     pub fn set_account_default_username(&self, username: String) -> Result<(), FfiError> {
         self.update_account_state(move |p| p.default_username = username)
     }
 
-    /// Личный волт аккаунта, если назначен. Id отдаётся в ТОМ ЖЕ представлении, что
-    /// и `list_vaults` (иначе UI не сматчит: local-волт там UTF-8-строкой, cloud —
-    /// hex). Локальный существующий волт → сырая UTF-8-строка; cloud или неизвестный
-    /// (напр. удалён) → hex (как раньше).
+    /// The account's personal vault, if assigned. The id is returned in the SAME representation as
+    /// `list_vaults` (otherwise the UI won't match: there a local vault is a UTF-8 string, a cloud one is
+    /// hex). An existing local vault → the raw UTF-8 string; a cloud or unknown one
+    /// (e.g. deleted) → hex (as before).
     pub fn get_personal_vault(&self) -> Result<Option<String>, FfiError> {
         let raw = match self.read_account_state()? {
             Some(p) if !p.personal_vault_id.is_empty() => p.personal_vault_id,
@@ -1530,7 +1530,7 @@ impl Core {
         Ok(Some(display))
     }
 
-    /// Account-default username, если задан.
+    /// Account-default username, if set.
     pub fn get_account_default_username(&self) -> Result<Option<String>, FfiError> {
         Ok(self.read_account_state()?.and_then(|p| {
             if p.default_username.is_empty() {
@@ -1541,12 +1541,12 @@ impl Core {
         }))
     }
 
-    /// **Eager-ротация Vault Key** cloud-волта (server-tz §6.2): новый VK',
-    /// manifest на `epoch+1` над оставшимися, гранты под VK', re-wrap живых
-    /// item-ключей, подъём пола эпохи (атомарно). Владелец (этот keyset) всегда
-    /// остаётся `Admin` в наборе. `remaining_member_pubkeys` — дополнительные
-    /// оставшиеся члены как `(ed25519_hex, x25519_hex, role)`; отсутствующие в
-    /// списке (кроме владельца) считаются отозванными. Возвращает новую эпоху.
+    /// **Eager Vault Key rotation** of a cloud vault (server-tz §6.2): a new VK',
+    /// a manifest at `epoch+1` over the remaining members, grants under VK', a re-wrap of live
+    /// item keys, raising the epoch floor (atomically). The owner (this keyset) always
+    /// stays `Admin` in the set. `remaining_member_pubkeys` are the additional
+    /// remaining members as `(ed25519_hex, x25519_hex, role)`; those absent from
+    /// the list (except the owner) are treated as revoked. Returns the new epoch.
     pub fn rotate_vk(
         &self,
         vault_id: String,
@@ -1558,7 +1558,7 @@ impl Core {
         let owner_ed = state.keyset.signing.verifying.to_bytes().to_vec();
         let owner_x = state.keyset.encryption.public.to_bytes().to_vec();
 
-        // строим набор оставшихся: владелец Admin + переданные.
+        // build the remaining set: the owner as Admin + those passed in.
         let mut members: Vec<Member> = vec![Member {
             ed25519_pub: owner_ed.clone(),
             role: MemberRole::Admin,
@@ -1569,7 +1569,7 @@ impl Core {
             let ed = decode_pubkey32("ed25519", &rm.ed25519_pub_hex)?;
             let x = decode_pubkey32("x25519", &rm.x25519_pub_hex)?;
             if ed == owner_ed {
-                continue; // владелец уже добавлен
+                continue; // the owner is already added
             }
             members.push(Member {
                 ed25519_pub: ed.clone(),
@@ -1584,9 +1584,9 @@ impl Core {
             .map_err(map_vault_err)
     }
 
-    /// **Кооперативный hard-delete** cloud-волта (server-tz §6.4): физически
-    /// стирает запись/items/историю/манифесты/гранты/пол эпохи и зануляет VK.
-    /// Best-effort/гигиена, НЕ remote-wipe (модифицированный клиент данные оставит).
+    /// **Cooperative hard-delete** of a cloud vault (server-tz §6.4): physically
+    /// erases the record/items/history/manifests/grants/epoch-floor and zeroizes the VK.
+    /// Best-effort/hygiene, NOT a remote wipe (a modified client will keep the data).
     pub fn purge_vault(&self, vault_id: String) -> Result<(), FfiError> {
         let vid = decode_vid(&vault_id)?;
         let mut guard = self.locked_state();
@@ -1597,8 +1597,8 @@ impl Core {
         Ok(())
     }
 
-    /// Member-aware аудит целостности cloud-волта (server-tz §6.2): D1-цепочка +
-    /// пол эпохи. Отчёт без секретов. (Для local-волтов — `verify_vault_integrity`.)
+    /// Member-aware integrity audit of a cloud vault (server-tz §6.2): the D1 chain +
+    /// the epoch floor. A report with no secrets. (For local vaults — `verify_vault_integrity`.)
     pub fn verify_chain(&self, vault_id: String) -> Result<VaultIntegrityReport, FfiError> {
         let vid = decode_vid(&vault_id)?;
         let mut guard = self.locked_state();
@@ -1608,9 +1608,9 @@ impl Core {
         Ok(integrity_report_to_ffi(report))
     }
 
-    /// Локальный account-id (server-tz §2.1): генерится один раз и персистится в
-    /// storage-meta; последующие вызовы возвращают тот же id. Открытый
-    /// идентификатор (НЕ секрет), hex (16 байт). Требует unlock (storage).
+    /// Local account-id (server-tz §2.1): generated once and persisted in
+    /// storage-meta; subsequent calls return the same id. A public
+    /// identifier (NOT a secret), hex (16 bytes). Requires unlock (storage).
     pub fn account_id(&self) -> Result<String, FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
@@ -1618,9 +1618,9 @@ impl Core {
         Ok(hex::encode(id))
     }
 
-    /// Self-attested registration-блоб (server-tz §2.1): связывает account-id с
-    /// публичными ключами keyset и подписывает Ed25519-ключом keyset. Непрозрачный
-    /// подписанный блоб (НЕ секрет) — публикуется серверу. Требует unlock.
+    /// A self-attested registration blob (server-tz §2.1): binds the account-id to the
+    /// keyset's public keys and signs it with the keyset's Ed25519 key. An opaque
+    /// signed blob (NOT a secret) — published to the server. Requires unlock.
     pub fn build_registration(&self) -> Result<Vec<u8>, FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
@@ -1628,10 +1628,10 @@ impl Core {
         build_registration(&state.keyset, &id).map_err(map_keychain_err)
     }
 
-    /// Как [`Core::build_registration`], но возвращает И канонический payload, И
-    /// подпись — сервер требует оба поля (`registration_payload` +
-    /// `registration_signature`). payload строится в ядре, чтобы UI не пересобирал
-    /// каноническую форму (риск рассинхрона байт → отказ верификации на сервере).
+    /// Like [`Core::build_registration`], but returns BOTH the canonical payload AND
+    /// the signature — the server requires both fields (`registration_payload` +
+    /// `registration_signature`). The payload is built in the core so the UI doesn't rebuild
+    /// the canonical form (a risk of byte desync → verification failure on the server).
     pub fn build_registration_request(&self) -> Result<RegistrationRequest, FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
@@ -1641,9 +1641,9 @@ impl Core {
         Ok(RegistrationRequest { payload, signature })
     }
 
-    /// Подписывает серверный challenge Ed25519-ключом keyset (server-tz §2.2,
-    /// домен `unissh-server-auth-v1`). Возвращает блоб подписи (НЕ секрет);
-    /// приватный ключ наружу не идёт. Проверку nonce/срока делает сервер.
+    /// Signs a server challenge with the keyset's Ed25519 key (server-tz §2.2,
+    /// domain `unissh-server-auth-v1`). Returns the signature blob (NOT a secret);
+    /// the private key never leaves. Nonce/expiry checking is done by the server.
     #[allow(clippy::too_many_arguments)]
     pub fn sign_server_challenge(
         &self,
@@ -1667,13 +1667,13 @@ impl Core {
         sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
     }
 
-    /// Как [`Core::sign_server_challenge`], но принимает идентификаторы как **сырые
-    /// байты** (host/account_id/device_id/key_id), а не UTF-8-строки. Нужно для
-    /// серверного auth-флоу: сервер выдаёт `account_id`/`device_id` случайными 16
-    /// байтами (НЕ UTF-8), а подпись/проверку challenge ведёт над сырыми байтами
-    /// (`ids::unb64` → `ServerAuthChallenge::canonical`). Строковый вариант
-    /// подписал бы UTF-8-байты строки → mismatch. Возвращает блоб подписи (НЕ
-    /// секрет); проверку nonce/срока делает сервер.
+    /// Like [`Core::sign_server_challenge`], but takes the identifiers as **raw
+    /// bytes** (host/account_id/device_id/key_id) rather than UTF-8 strings. Needed for
+    /// the server auth flow: the server issues `account_id`/`device_id` as random 16
+    /// bytes (NOT UTF-8), and performs signing/verification of the challenge over raw bytes
+    /// (`ids::unb64` → `ServerAuthChallenge::canonical`). The string variant
+    /// would sign the string's UTF-8 bytes → mismatch. Returns the signature blob (NOT
+    /// a secret); nonce/expiry checking is done by the server.
     #[allow(clippy::too_many_arguments)]
     pub fn sign_server_challenge_raw(
         &self,
@@ -1697,7 +1697,7 @@ impl Core {
         sign_server_challenge(&state.keyset, &challenge).map_err(map_keychain_err)
     }
 
-    /// Читает cache-policy волта (server-tz §6.6). `vault_id` — hex (cloud).
+    /// Reads a vault's cache policy (server-tz §6.6). `vault_id` is hex (cloud).
     pub fn get_cache_policy(&self, vault_id: String) -> Result<FfiCachePolicy, FfiError> {
         let vid = decode_vid(&vault_id)?;
         let mut guard = self.locked_state();
@@ -1710,7 +1710,7 @@ impl Core {
         Ok(FfiCachePolicy::from_core(rec.cache_policy))
     }
 
-    /// Меняет cache-policy волта (version+1, переподпись записи). `vault_id` — hex.
+    /// Changes a vault's cache policy (version+1, re-signs the record). `vault_id` is hex.
     pub fn set_cache_policy(
         &self,
         vault_id: String,
@@ -1725,11 +1725,11 @@ impl Core {
             .map_err(map_vault_err)
     }
 
-    /// Дописывает подписанную аудит-запись (server-tz §8): storage хранит
-    /// `(entry_blob, signature, author_pubkey)` как есть, присваивает монотонный
-    /// seq. Подпись/верификацию делает слой выше — FFI переносит непрозрачные
-    /// блобы. `vault_id`/`author_pubkey` — hex. (vault_id в storage-audit v1 не
-    /// хранится — инстанс-уровневый лог; принимается для будущего vault-scoping.)
+    /// Appends a signed audit entry (server-tz §8): storage stores
+    /// `(entry_blob, signature, author_pubkey)` as-is and assigns a monotonic
+    /// seq. Signing/verification is done by a higher layer — the FFI carries opaque
+    /// blobs. `vault_id`/`author_pubkey` are hex. (vault_id is not stored in storage-audit v1
+    /// — it is an instance-level log; accepted for future vault-scoping.)
     pub fn audit_append(
         &self,
         vault_id: String,
@@ -1737,7 +1737,7 @@ impl Core {
         signature: Vec<u8>,
         author_pubkey: String,
     ) -> Result<u64, FfiError> {
-        let _vid = decode_vid(&vault_id)?; // валидация формата (на будущее)
+        let _vid = decode_vid(&vault_id)?; // format validation (for the future)
         let author = hex::decode(author_pubkey.trim())
             .map_err(|_| FfiError::other("invalid hex author_pubkey"))?;
         let guard = self.locked_state();
@@ -1748,8 +1748,8 @@ impl Core {
             .map_err(FfiError::other)
     }
 
-    /// Записи аудита с `seq > since_seq` (server-tz §8, admin-view). Блобы
-    /// непрозрачны; seq — открытая метадата (НЕ доверенная для tamper-evidence v1).
+    /// Audit entries with `seq > since_seq` (server-tz §8, admin view). The blobs
+    /// are opaque; seq is public metadata (NOT trusted for tamper-evidence in v1).
     pub fn audit_query(&self, since_seq: u64) -> Result<Vec<FfiAuditEntry>, FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
@@ -1768,24 +1768,24 @@ impl Core {
             .collect())
     }
 
-    /// **Онбординг Path A** (server-tz §9): новое устройство принимает зашифрованный
-    /// keyset-блоб «с сервера», распаковывает его паролем + Secret Key, персистит
-    /// блоб в локальный сайдкар (уже-зашифрован — не секрет) и открывает БД
-    /// инстанса. Не требует предварительного локального keyset.
+    /// **Onboarding Path A** (server-tz §9): a new device accepts an encrypted
+    /// keyset blob "from the server", unwraps it with the password + Secret Key, persists
+    /// the blob into the local sidecar (already encrypted — not a secret) and opens the
+    /// instance DB. Does not require a pre-existing local keyset.
     ///
-    /// Anti-rollback: db-ключ выводится из распакованного keyset → сначала
-    /// `unlock_account` (AEAD-аутентификация кредов и деривация ключа), затем
-    /// открытие БД, затем подъём generation-пола до принятой записи (TOFU при
-    /// первом онбординге; понизить пол нельзя). v1 honest gap: confidentiality
-    /// есть, freshness относительно сервера — на слое выше.
+    /// Anti-rollback: the db key is derived from the unwrapped keyset → first
+    /// `unlock_account` (AEAD authentication of the credentials and key derivation), then
+    /// opening the DB, then raising the generation floor to the accepted record (TOFU on
+    /// the first onboarding; the floor cannot be lowered). v1 honest gap: confidentiality
+    /// is present, freshness relative to the server is at a higher layer.
     pub fn unlock_from_server_blob(
         &self,
         keyset_blob: Vec<u8>,
         password: Option<String>,
         secret_key_hex: String,
     ) -> Result<(), FfiError> {
-        // Один guard на весь метод (сериализация + финальная установка состояния):
-        // Mutex не reentrant, повторный self.locked_state() здесь → дедлок.
+        // One guard for the whole method (serialization + final state installation):
+        // the Mutex is not reentrant; a second self.locked_state() here → deadlock.
         let mut guard = self.locked_state();
         let password = password.map(Zeroizing::new);
         let secret_key_hex = Zeroizing::new(secret_key_hex);
@@ -1796,25 +1796,25 @@ impl Core {
         let secret_key =
             SecretKey::from_slice(&sk_bytes).map_err(|_| FfiError::InvalidCredentials)?;
 
-        // migrate-on-open: легаси-блоб (до round 2) от старого устройства открывается
-        // пробой и сразу переоборачивается под текущую схему — в локальный сайдкар
-        // ляжет уже v3 (`migrated`), офлайн-unlock дальше пойдёт без пробы.
+        // migrate-on-open: a legacy blob (before round 2) from an old device is opened
+        // via a probe and immediately re-wrapped under the current scheme — the local sidecar
+        // will hold a v3 record (`migrated`), and offline unlock will proceed without probing.
         let (unlocked, migrated) =
             unlock_account_migrating(&enc, password.as_deref().map(|s| s.as_bytes()), &secret_key)
                 .map_err(map_keychain_err)?;
 
-        // db-ключ выводится из распакованного keyset, поэтому пол (в storage-meta)
-        // доступен только ПОСЛЕ unlock+open. Распаковка raw-крипто (AEAD-проверка
-        // кредов) не вводит keyset в систему и не создаёт побочных эффектов; приём
-        // блоба = персист сайдкара + установка состояния НИЖЕ, и оба отсекаются
-        // anti-rollback ДО них.
+        // the db key is derived from the unwrapped keyset, so the floor (in storage-meta)
+        // is available only AFTER unlock+open. The raw-crypto unwrap (AEAD verification
+        // of the credentials) does not introduce the keyset into the system and has no side effects; accepting
+        // the blob = persisting the sidecar + installing state BELOW, and both are cut off by
+        // anti-rollback BEFORE them.
         let db_key = derive_db_key(&unlocked);
         let storage = Storage::open(&self.db_path, &db_key[..]).map_err(FfiError::other)?;
 
-        // anti-rollback (server-tz §13.13b): ОТВЕРГАЕМ устаревшую generation ДО
-        // приёма блоба. Прежняя версия только поднимала пол (raise) — устаревший
-        // keyset-блоб ниже пола проходил вопреки докстрингу. Та же логика, что в
-        // unlock_account_checked (которую нельзя вызвать раньше: storage ещё закрыт).
+        // anti-rollback (server-tz §13.13b): we REJECT a stale generation BEFORE
+        // accepting the blob. The previous version only raised the floor — a stale
+        // keyset blob below the floor passed contrary to the docstring. The same logic as in
+        // unlock_account_checked (which cannot be called earlier: storage is still closed).
         let floor = unissh_keychain::keyset_gen_floor(&storage)
             .map_err(map_keychain_err)?
             .unwrap_or(0);
@@ -1830,15 +1830,15 @@ impl Core {
             ));
         }
 
-        // Персистим keyset-блоб в локальный сайдкар (атомарно), чтобы офлайн-unlock
-        // работал далее. Уже-зашифрованный блоб — не секрет. Если блоб был легаси,
-        // на диск ложится переобёрнутая (v3, generation+1) запись. Персист ДО подъёма
-        // пола — защита от кирпича (см. `unlock`). Пол поднимаем до фактической
-        // (персистнутой) generation.
+        // Persist the keyset blob into the local sidecar (atomically) so that offline unlock
+        // works afterward. An already-encrypted blob is not a secret. If the blob was legacy,
+        // a re-wrapped (v3, generation+1) record lands on disk. Persisting BEFORE raising
+        // the floor — brick protection (see `unlock`). We raise the floor to the actual
+        // (persisted) generation.
         let record_to_persist = migrated.as_ref().unwrap_or(&enc);
         let accepted_gen = record_to_persist.generation as u64;
-        // Бэкап существующего сайдкара только если перезапись — это миграция легаси-блоба
-        // (логирует путь). Обычный приём server-блоба не трогаем.
+        // Back up the existing sidecar only if the overwrite is a legacy-blob migration
+        // (logs the path). We don't touch a normal server-blob acceptance.
         if migrated.is_some() {
             backup_keyset_sidecar(&self.keyset_path);
         }
@@ -1851,7 +1851,7 @@ impl Core {
                 accepted_gen
             );
         }
-        // Принято: поднять пол до принятой generation (TOFU; понизить нельзя).
+        // Accepted: raise the floor to the accepted generation (TOFU; cannot lower).
         unissh_keychain::raise_keyset_gen_floor(&storage, accepted_gen)
             .map_err(map_keychain_err)?;
 
@@ -1865,15 +1865,15 @@ impl Core {
         Ok(())
     }
 
-    /// **Онбординг Path B (initiator):** завершает PAKE по `msg2` responder'а,
-    /// проверяет подтверждение и E2E-шифрует секреты keyset + **общий аккаунтный
-    /// Secret Key** (`secret_key_hex`) под канальным ключом. Возвращает `msg3`
-    /// (sealed keyset — релей-блоб; sealed, не plaintext-секрет). Требует
-    /// разблокированного keyset. Хэндл одноразовый (повторный вызов → Other).
+    /// **Onboarding Path B (initiator):** completes PAKE using the responder's `msg2`,
+    /// verifies the confirmation and E2E-encrypts the keyset secrets + the **shared account
+    /// Secret Key** (`secret_key_hex`) under the channel key. Returns `msg3`
+    /// (the sealed keyset — a relay blob; sealed, not a plaintext secret). Requires
+    /// an unlocked keyset. The handle is one-shot (a second call → Other).
     ///
-    /// `secret_key_hex` — Secret Key ЭТОГО устройства (его читает Tauri-слой из
-    /// кейчейна; Core ключ в памяти не держит), чтобы все устройства аккаунта
-    /// делили один ключ (модель 1Password).
+    /// `secret_key_hex` is THIS device's Secret Key (read by the Tauri layer from the
+    /// keychain; the Core does not hold the key in memory) so that all of the account's devices
+    /// share a single key (the 1Password model).
     pub fn onboard_confirm_and_seal(
         &self,
         handle: Arc<OnboardInitiatorHandle>,
@@ -1898,19 +1898,19 @@ impl Core {
             .map_err(map_keychain_err)
     }
 
-    /// **Онбординг Path B (responder):** принимает `msg3`, проверяет подтверждение,
-    /// расшифровывает payload (секреты keyset + **общий аккаунтный Secret Key**) и
-    /// ставит собственную device-запись под этим общим ключом и локальным
-    /// `password`, персистит keyset-сайдкар и открывает БД инстанса. Возвращает
-    /// общий Secret Key (hex), чтобы Tauri-слой сохранил его в кейчейн устройства
-    /// для будущих разблокировок. Не требует предварительного состояния. Одноразовый.
+    /// **Onboarding Path B (responder):** accepts `msg3`, verifies the confirmation,
+    /// decrypts the payload (the keyset secrets + the **shared account Secret Key**) and
+    /// creates its own device record under this shared key and the local
+    /// `password`, persists the keyset sidecar and opens the instance DB. Returns
+    /// the shared Secret Key (hex) so the Tauri layer can store it in the device keychain
+    /// for future unlocks. Does not require any prior state. One-shot.
     pub fn onboard_finish_install(
         &self,
         handle: Arc<OnboardResponderHandle>,
         msg3: Vec<u8>,
         password: Option<String>,
     ) -> Result<String, FfiError> {
-        // Один guard на весь метод (Mutex не reentrant — см. unlock_from_server_blob).
+        // One guard for the whole method (the Mutex is not reentrant — see unlock_from_server_blob).
         let mut guard = self.locked_state();
         if self.keyset_path.exists() || self.db_path.exists() {
             return Err(FfiError::AlreadyExists);
@@ -1936,7 +1936,7 @@ impl Core {
             FfiError::other(e)
         })?;
         let enc_bytes = enc.to_bytes().map_err(FfiError::other)?;
-        // sealed keyset-сайдкар (O_EXCL): при сбое — откат БД/сайдкара.
+        // sealed keyset sidecar (O_EXCL): on failure — roll back the DB/sidecar.
         match open_keyset_file(&self.keyset_path, true) {
             Ok(mut f) => {
                 use std::io::Write;
@@ -1953,7 +1953,7 @@ impl Core {
                 return Err(FfiError::other(e));
             }
         }
-        // anti-rollback пол: TOFU на generation принятого keyset.
+        // anti-rollback floor: TOFU on the generation of the accepted keyset.
         unissh_keychain::raise_keyset_gen_floor(&storage, enc.generation as u64)
             .map_err(map_keychain_err)?;
 
@@ -1963,24 +1963,24 @@ impl Core {
             agent: InMemoryAgent::new(),
             vault_names: HashMap::new(),
         });
-        // ОБЩИЙ аккаунтный Secret Key (одинаков на всех устройствах, модель A):
-        // возвращаем hex, чтобы Tauri-слой сохранил его в кейчейн ЭТОГО устройства
-        // для будущих разблокировок. Пользователю НЕ показываем — нового Emergency
-        // Kit нет, у него уже есть аккаунтный. Промежуточный hex зануляем; строка
-        // через границу FFI — вне нашего контроля (ограничение FFI).
+        // The SHARED account Secret Key (identical on all devices, model A):
+        // we return hex so the Tauri layer can store it in THIS device's keychain
+        // for future unlocks. We do NOT show it to the user — there is no new Emergency
+        // Kit; they already have the account one. We zeroize the intermediate hex; the string
+        // crossing the FFI boundary is beyond our control (an FFI limitation).
         let kit = Zeroizing::new(hex::encode(secret_key.expose_bytes()));
         Ok(kit.as_str().to_string())
     }
 
-    /// **Запускает синк** против foreign-транспорта (server-tz §3.3): сначала push
-    /// локальных объектов, затем pull+verify-before-apply дельты. Транспорт
-    /// недоверенный — каждый объект верифицируется (подпись/эпоха-пол/авторитет)
-    /// до применения. Возвращает сведённый отчёт (без секретов). Требует unlock.
+    /// **Runs a sync** against the foreign transport (server-tz §3.3): first a push
+    /// of local objects, then pull + verify-before-apply of the delta. The transport
+    /// is untrusted — every object is verified (signature/epoch-floor/authority)
+    /// before being applied. Returns an aggregated report (no secrets). Requires unlock.
     ///
-    /// `tenant_b64` — base64-`tenant_id` синкаемого сервера (как в
-    /// `ServerConfig.tenant_id`). **1:1-привязка:** push отдаёт ТОЛЬКО cloud-волты,
-    /// привязанные к этому tenant (см. `sync_push`); локальные и привязанные к
-    /// другим серверам волты не уходят. Пустой `tenant_b64` → ничего не пушится.
+    /// `tenant_b64` is the base64 `tenant_id` of the server being synced (as in
+    /// `ServerConfig.tenant_id`). **1:1 binding:** the push emits ONLY the cloud vaults
+    /// bound to this tenant (see `sync_push`); local vaults and those bound to
+    /// other servers are not sent. An empty `tenant_b64` → nothing is pushed.
     pub fn sync_now(
         &self,
         transport: Arc<dyn FfiSyncTransport>,
@@ -1998,7 +1998,7 @@ impl Core {
             push_err: Mutex::new(None),
         };
 
-        // push: если коллбэк бросил — пробросить его ошибку (не маскировать Format).
+        // push: if the callback threw — propagate its error (don't mask it as Format).
         let push = sync_push(&mut adapter, &state.storage, tenant_b64.as_bytes()).map_err(|e| {
             if let Some(fe) = adapter
                 .push_err
@@ -2023,29 +2023,29 @@ impl Core {
         })
     }
 
-    /// Сбрасывает pull-курсор тенанта → следующий `sync_now` перечитывает ВСЮ
-    /// историю сервера (полный re-pull), а не инкремент от последнего seq. Нужно,
-    /// когда объекты уже были обработаны при ПРЕЖНЕМ authority-контексте и отвергнуты
-    /// (reject двигает курсор), а keyset потом сменился на владельца (re-attach):
-    /// без сброса владелец не перечитает волт, который теперь может расшифровать.
-    /// `tenant_b64` — та же строка, что передаётся в `sync_now` (ключ курсора
-    /// строится из её байт). Требует unlock.
+    /// Resets the tenant's pull cursor → the next `sync_now` re-reads the ENTIRE
+    /// server history (a full re-pull) rather than an increment from the last seq. Needed
+    /// when objects were already processed under a PREVIOUS authority context and rejected
+    /// (a reject advances the cursor), and the keyset later changed to the owner (re-attach):
+    /// without a reset the owner will not re-read the vault they can now decrypt.
+    /// `tenant_b64` is the same string passed to `sync_now` (the cursor key
+    /// is built from its bytes). Requires unlock.
     pub fn reset_pull_cursor(&self, tenant_b64: String) -> Result<(), FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
         reset_pull_cursor(&state.storage, tenant_b64.as_bytes()).map_err(map_sync_err)
     }
 
-    /// Восстанавливает облачные волты, удалённые ЛОКАЛЬНО (tombstone), но всё ещё
-    /// живые на сервере. Локальный tombstone новее (версия выросла при удалении) →
-    /// LWW не даёт pull'у его перезаписать серверной копией, а `list_vaults` его
-    /// прячет: волт «застрял удалённым» на этом устройстве. Физически стираем его
-    /// локальную запись (`purge_vault_data`) и сбрасываем pull-курсор тенанта →
-    /// следующий `sync_now` перетянет живую серверную копию заново. Волты, удалённые
-    /// И на сервере, после re-pull снова станут tombstone (не воскреснут — это верно).
-    /// Трогаем только tombstone-волты, привязанные к ЭТОМУ тенанту или непривязанные
-    /// (после снятия линка); чужие не трогаем. Возвращает число очищенных записей.
-    /// Требует unlock.
+    /// Restores cloud vaults deleted LOCALLY (tombstoned) but still
+    /// alive on the server. The local tombstone is newer (the version grew on deletion) →
+    /// LWW prevents the pull from overwriting it with the server copy, and `list_vaults`
+    /// hides it: the vault is "stuck deleted" on this device. We physically erase its
+    /// local record (`purge_vault_data`) and reset the tenant's pull cursor →
+    /// the next `sync_now` re-pulls the live server copy anew. Vaults deleted
+    /// on the server too will become tombstones again after re-pull (they won't resurrect — which is correct).
+    /// We touch only tombstoned vaults bound to THIS tenant or unbound
+    /// (after unlinking); others are left untouched. Returns the number of records purged.
+    /// Requires unlock.
     pub fn restore_deleted_cloud_vaults(&self, tenant_b64: String) -> Result<u32, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2057,7 +2057,7 @@ impl Core {
             .map_err(FfiError::other)?
         {
             if !v.sync_tenant.is_empty() && v.sync_tenant != tenant {
-                continue; // привязан к ДРУГОМУ серверу — не наш, не трогаем
+                continue; // bound to ANOTHER server — not ours, don't touch
             }
             state
                 .storage
@@ -2072,7 +2072,7 @@ impl Core {
         Ok(restored)
     }
 
-    /// Переименовывает волт.
+    /// Renames a vault.
     pub fn rename_vault(&self, vault_id: String, new_name: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2089,7 +2089,7 @@ impl Core {
         Ok(())
     }
 
-    /// Удаляет волт (tombstone). Из списка он исчезает.
+    /// Deletes a vault (tombstone). It disappears from the list.
     pub fn delete_vault(&self, vault_id: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2100,7 +2100,7 @@ impl Core {
         Ok(())
     }
 
-    /// Удаляет item (tombstone) и, если он был SSH-ключом в агенте, выгружает его.
+    /// Deletes an item (tombstone) and, if it was an SSH key in the agent, unloads it.
     pub fn delete_item(&self, vault_id: String, item_id: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2113,24 +2113,24 @@ impl Core {
         vault
             .delete_item(item_id.as_bytes())
             .map_err(FfiError::other)?;
-        // A4a namespace: агент хранит ключ под agent_key_id(vault_id,item_id), а не
-        // под голым item_id — выгружать надо тем же ключом, иначе remove — no-op и
-        // отозванный/ротированный приватник остаётся живым в агенте до конца сессии.
+        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+        // a revoked/rotated private key stays alive in the agent until the end of the session.
         state.agent.remove(&agent_key_id(&vault_id, &item_id));
         Ok(())
     }
 
-    /// Сохраняет/обновляет пароль сервера как item волта (тип «пароль»).
-    /// Контент — UTF-8 байты пароля; шифрование/подпись/версия — слой vault.
-    /// (Вход пароля от UI допустим — он там и рождается; обратно — только через
-    /// явный [`Core::get_password`].)
+    /// Saves/updates a server password as a vault item (type "password").
+    /// The content is the UTF-8 bytes of the password; encryption/signing/versioning is the vault layer.
+    /// (Password input from the UI is allowed — that is where it originates; the way back is only via
+    /// the explicit [`Core::get_password`].)
     pub fn save_password(
         &self,
         vault_id: String,
         item_id: String,
         password: String,
     ) -> Result<(), FfiError> {
-        // Пароль немедленно в Zeroizing — зануляется при выходе.
+        // The password goes into Zeroizing immediately — zeroized on exit.
         let password = Zeroizing::new(password);
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2152,13 +2152,13 @@ impl Core {
         Ok(())
     }
 
-    /// Возвращает пароль сервера (reveal: показать/скопировать в UI по явному
-    /// действию пользователя). Работает **только** для item типа «пароль» —
-    /// приватный ключ или иной item через этот вызов получить нельзя, инвариант
-    /// «plaintext-ключи не пересекают FFI» сохраняется.
+    /// Returns a server password (reveal: display/copy in the UI on an explicit
+    /// user action). Works **only** for an item of type "password" —
+    /// a private key or any other item cannot be obtained through this call; the invariant
+    /// "plaintext keys never cross the FFI" is preserved.
     ///
-    /// ⚠️ Возвращаемая `String` уходит за FFI-границу и на той стороне не
-    /// зануляется — UI отвечает за минимальное время жизни (показ/клипборд).
+    /// ⚠️ The returned `String` crosses the FFI boundary and on the other side is not
+    /// zeroized — the UI is responsible for a minimal lifetime (display/clipboard).
     pub fn get_password(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2166,10 +2166,10 @@ impl Core {
         Ok(password.as_str().to_string())
     }
 
-    /// Сохраняет/обновляет зашифрованную заметку как item волта (тип «заметка»).
-    /// Контент — произвольный UTF-8 (recovery-коды, доступы к IPMI и т.п.).
-    /// Шифрование/подпись/версия — слой vault; вход от UI допустим, обратно —
-    /// только через явный [`Core::get_note`].
+    /// Saves/updates an encrypted note as a vault item (type "note").
+    /// The content is arbitrary UTF-8 (recovery codes, IPMI credentials, etc.).
+    /// Encryption/signing/versioning is the vault layer; input from the UI is allowed, the way back is
+    /// only via the explicit [`Core::get_note`].
     pub fn save_note(
         &self,
         vault_id: String,
@@ -2197,11 +2197,11 @@ impl Core {
         Ok(())
     }
 
-    /// Возвращает текст заметки (reveal для UI). Работает **только** для item типа
-    /// «заметка» — ключ/пароль/иной item через этот вызов получить нельзя.
+    /// Returns a note's text (reveal for the UI). Works **only** for an item of type
+    /// "note" — a key/password/other item cannot be obtained through this call.
     ///
-    /// ⚠️ Возвращаемая `String` уходит за FFI-границу и там не зануляется — UI
-    /// отвечает за её время жизни.
+    /// ⚠️ The returned `String` crosses the FFI boundary and is not zeroized there — the UI
+    /// is responsible for its lifetime.
     pub fn get_note(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2209,8 +2209,8 @@ impl Core {
         Ok(text.as_str().to_string())
     }
 
-    /// Версии item, доступные для reveal: текущая + архивные (история секрета).
-    /// Возвращает только номера версий — секретов не раскрывает.
+    /// Item versions available for reveal: the current one + archived ones (the secret's history).
+    /// Returns only the version numbers — it reveals no secrets.
     pub fn list_item_versions(
         &self,
         vault_id: String,
@@ -2229,7 +2229,7 @@ impl Core {
             .map_err(FfiError::other)
     }
 
-    /// Reveal конкретной версии пароля из истории (type-gated к «паролю»).
+    /// Reveal of a specific password version from history (type-gated to "password").
     pub fn get_password_version(
         &self,
         vault_id: String,
@@ -2245,7 +2245,7 @@ impl Core {
         )
     }
 
-    /// Reveal конкретной версии заметки из истории (type-gated к «заметке»).
+    /// Reveal of a specific note version from history (type-gated to "note").
     pub fn get_note_version(
         &self,
         vault_id: String,
@@ -2255,7 +2255,7 @@ impl Core {
         self.read_item_version(&vault_id, &item_id, version, ITEM_TYPE_NOTE, "a note")
     }
 
-    /// Список закреплённых host key (для экрана known_hosts).
+    /// List of pinned host keys (for the known_hosts screen).
     pub fn list_known_hosts(&self) -> Result<Vec<KnownHostInfo>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2273,7 +2273,7 @@ impl Core {
             .collect())
     }
 
-    /// «Забыть» закреплённый host key. Возвращает, была ли запись.
+    /// "Forget" a pinned host key. Returns whether there was a record.
     pub fn forget_host(&self, host: String, port: u16) -> Result<bool, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2283,16 +2283,16 @@ impl Core {
             .map_err(FfiError::other)
     }
 
-    /// Осознанно доверять НОВОМУ host key после [`FfiError::HostKeyMismatch`]:
-    /// подключается напрямую (только хендшейк), сверяет предъявленный ключ с
-    /// подтверждённым пользователем `expected_fingerprint` (из ошибки mismatch) и
-    /// только при совпадении перезакрепляет его. Возвращает SHA256-отпечаток.
-    /// Требует разблокировки.
+    /// Deliberately trust a NEW host key after [`FfiError::HostKeyMismatch`]:
+    /// connects directly (handshake only), compares the presented key with
+    /// the user-confirmed `expected_fingerprint` (from the mismatch error) and
+    /// re-pins it only on a match. Returns the SHA256 fingerprint.
+    /// Requires an unlock.
     ///
-    /// Если за время между предупреждением и согласием ключ снова подменили,
-    /// вернётся `HostKeyMismatch` с фактическим отпечатком (закрепления не будет).
-    /// Только прямые хосты (без ProxyJump): для джамп-целей — `forget_host` +
-    /// обычное переподключение (повторный TOFU).
+    /// If the key was swapped again between the warning and the consent,
+    /// `HostKeyMismatch` is returned with the actual fingerprint (no pinning happens).
+    /// Direct hosts only (no ProxyJump): for jump targets — `forget_host` +
+    /// a normal reconnection (TOFU again).
     pub fn trust_host(
         &self,
         host: String,
@@ -2320,23 +2320,23 @@ impl Core {
             })
     }
 
-    /// Меняет мастер-пароль инстанса (re-wrap keyset под новый Unlock Key).
-    /// Требует старые креды (`old_password` + `secret_key_hex`) — это проверяет
-    /// их корректность и исключает «кирпич». `new_password = None` → беспарольный
-    /// режим (SecretKeyOnly). Можно вызывать в заблокированном состоянии (работает
-    /// с записью keyset на диске).
+    /// Changes the instance master password (re-wraps the keyset under a new Unlock Key).
+    /// Requires the old credentials (`old_password` + `secret_key_hex`) — this verifies
+    /// their correctness and rules out a "brick". `new_password = None` → passwordless
+    /// mode (SecretKeyOnly). May be called while locked (works
+    /// with the on-disk keyset record).
     ///
-    /// Меняется только **обёртка** keyset: Secret Key, секреты keyset и ключ БД
-    /// не меняются, поэтому текущая разблокированная сессия (если есть) остаётся
-    /// валидной. Это re-wrap, а НЕ ротация ключей (ротация VK — ⏳ ПОТОМ).
+    /// Only the keyset **wrapper** changes: the Secret Key, the keyset secrets and the DB key
+    /// do not change, so the current unlocked session (if any) stays
+    /// valid. This is a re-wrap, NOT a key rotation (VK rotation is ⏳ LATER).
     pub fn change_password(
         &self,
         old_password: Option<String>,
         new_password: Option<String>,
         secret_key_hex: String,
     ) -> Result<(), FfiError> {
-        // Держим лок состояния на всё время read-compute-write записи keyset:
-        // сериализует против параллельного unlock/второго change_password (TOCTOU).
+        // Hold the state lock for the entire read-compute-write of the keyset record:
+        // it serializes against a concurrent unlock/second change_password (TOCTOU).
         let mut guard = self.locked_state();
         let old_password = old_password.map(Zeroizing::new);
         let new_password = new_password.map(Zeroizing::new);
@@ -2366,13 +2366,13 @@ impl Core {
         let new_bytes = new_enc.to_bytes().map_err(FfiError::other)?;
         write_keyset_atomic(&self.keyset_path, &new_bytes)?;
 
-        // anti-rollback (server-tz §13.13b): поднимаем доверенный пол поколения до
-        // новой generation, иначе старый (понижённый) keyset-блоб снова прошёл бы
-        // unlock_account_checked / unlock_from_server_blob после смены пароля. Пол
-        // живёт в storage-meta инстанса: если волт уже разблокирован — берём его
-        // открытый storage; иначе открываем БД (db-ключ инвариантен к re-wrap'у —
-        // секреты keyset не меняются — поэтому выводим его из old-enc, креды к
-        // которому только что подтвердил change_password).
+        // anti-rollback (server-tz §13.13b): raise the trusted generation floor to
+        // the new generation, otherwise the old (lowered) keyset blob would again pass
+        // unlock_account_checked / unlock_from_server_blob after a password change. The floor
+        // lives in the instance's storage-meta: if the vault is already unlocked — use its
+        // open storage; otherwise open the DB (the db key is invariant to the re-wrap —
+        // the keyset secrets don't change — so we derive it from old-enc, whose credentials
+        // change_password just verified).
         if let Some(state) = guard.as_mut() {
             unissh_keychain::raise_floor_after_change_password(&state.storage, &new_enc)
                 .map_err(map_keychain_err)?;
@@ -2391,8 +2391,8 @@ impl Core {
         Ok(())
     }
 
-    /// Список волтов. Имена берутся из кэша; для незакэшированных волтов —
-    /// один разворот VK (HPKE) с занесением в кэш.
+    /// List of vaults. Names come from the cache; for uncached vaults —
+    /// a single VK unwrap (HPKE) with caching.
     pub fn list_vaults(&self) -> Result<Vec<VaultInfo>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2410,17 +2410,17 @@ impl Core {
                     name
                 }
             };
-            // Cloud vault_id — UUIDv4 (сырые 16 байт, не UTF-8): отдаём как hex,
-            // чтобы он совпадал с возвратом `create_cloud_vault` и принимался
-            // cloud-методами (`decode_vid` ждёт hex). Local vault_id — осмысленная
-            // UTF-8-строка (round-trip через `as_bytes`), отдаём как есть.
+            // A cloud vault_id is a UUIDv4 (raw 16 bytes, not UTF-8): we return it as hex
+            // so it matches the return of `create_cloud_vault` and is accepted by
+            // the cloud methods (`decode_vid` expects hex). A local vault_id is a meaningful
+            // UTF-8 string (round-trips via `as_bytes`), returned as-is.
             let vault_id = match record.sync_target {
                 SyncTarget::Cloud => hex::encode(&record.vault_id),
                 _ => String::from_utf8_lossy(&record.vault_id).to_string(),
             };
-            // sync_tenant хранится как байты base64-строки tenant_id (непрозрачная
-            // метка маршрутизации). Пусто = не привязан → None. Иначе отдаём ту же
-            // base64-строку обратно, чтобы UI сопоставил волт со связанным сервером.
+            // sync_tenant is stored as the bytes of the base64 tenant_id string (an opaque
+            // routing label). Empty = not bound → None. Otherwise we return the same
+            // base64 string back so the UI can match the vault to its associated server.
             let sync_tenant = if record.sync_tenant.is_empty() {
                 None
             } else {
@@ -2436,8 +2436,8 @@ impl Core {
         Ok(out)
     }
 
-    /// Генерирует SSH-ключ Ed25519 **в ядре**, кладёт приватник зашифрованным в
-    /// волт и возвращает **публичный** ключ (OpenSSH). Приватник наружу не отдаётся.
+    /// Generates an Ed25519 SSH key **in the core**, stores the private key encrypted in
+    /// the vault and returns the **public** key (OpenSSH). The private key is not handed out.
     pub fn generate_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2461,15 +2461,15 @@ impl Core {
                 private_pem.as_bytes(),
             )
             .map_err(FfiError::other)?;
-        // Заменили материал ключа под тем же id → выгружаем прежний приватник из
-        // агента (namespaced), иначе коннекты в этой сессии продолжат подписывать
-        // СТАРЫМ ключом (load_key_into_agent короткозамыкается на agent.contains).
+        // The key material was replaced under the same id → unload the previous private key from
+        // the agent (namespaced), otherwise connects in this session will keep signing
+        // with the OLD key (load_key_into_agent short-circuits on agent.contains).
         state.agent.remove(&agent_key_id(&vault_id, &item_id));
         Ok(public)
     }
 
-    /// Импортирует существующий OpenSSH-приватник в волт. Возвращает публичный
-    /// ключ. (Вход приватника от UI допустим; обратно он не отдаётся.)
+    /// Imports an existing OpenSSH private key into the vault. Returns the public
+    /// key. (Private-key input from the UI is allowed; it is not handed back.)
     pub fn import_ssh_key(
         &self,
         vault_id: String,
@@ -2477,22 +2477,22 @@ impl Core {
         openssh_private: String,
         passphrase: Option<String>,
     ) -> Result<String, FfiError> {
-        // Приватник и пароль держим в Zeroizing — зануляются при выходе.
+        // We keep the private key and password in Zeroizing — zeroized on exit.
         let openssh_private = Zeroizing::new(openssh_private);
         let passphrase = passphrase.map(Zeroizing::new);
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        // Принимаем не только OpenSSH-контейнер, но и классические PEM
+        // We accept not only the OpenSSH container but also classic PEM
         // (PKCS#1 `BEGIN RSA PRIVATE KEY`, SEC1 `BEGIN EC PRIVATE KEY`,
-        // PKCS#8 `BEGIN PRIVATE KEY`, в т.ч. зашифрованные паролем): приводим к
-        // каноничному OpenSSH-приватнику. Без пароля для зашифрованного ключа
-        // вернётся ошибка `Encrypted` — UI запросит пароль и повторит.
+        // PKCS#8 `BEGIN PRIVATE KEY`, including password-encrypted ones): we normalize to
+        // a canonical OpenSSH private key. Without a password for an encrypted key
+        // an `Encrypted` error is returned — the UI will prompt for a password and retry.
         let normalized = unissh_ssh_agent::normalize_private_key_with_passphrase(
             &openssh_private,
             passphrase.as_deref().map(|p| p.as_str()),
         )
         .map_err(FfiError::ssh)?;
-        // валидируем и извлекаем публичный ключ через временный агент
+        // validate and extract the public key via a temporary agent
         let mut tmp = InMemoryAgent::new();
         tmp.add_from_openssh(b"tmp".to_vec(), normalized.as_bytes())
             .map_err(FfiError::ssh)?;
@@ -2516,23 +2516,23 @@ impl Core {
         vault
             .put_item(item_id.as_bytes(), ITEM_TYPE_SSH_KEY, normalized.as_bytes())
             .map_err(FfiError::other)?;
-        // Заменили материал ключа под тем же id → выгружаем прежний приватник из
-        // агента (namespaced), иначе коннекты в этой сессии продолжат подписывать
-        // СТАРЫМ ключом (load_key_into_agent короткозамыкается на agent.contains).
+        // The key material was replaced under the same id → unload the previous private key from
+        // the agent (namespaced), otherwise connects in this session will keep signing
+        // with the OLD key (load_key_into_agent short-circuits on agent.contains).
         state.agent.remove(&agent_key_id(&vault_id, &item_id));
         Ok(public)
     }
 
-    /// Привязывает OpenSSH user-сертификат к ключу `key_item_id` (хранится как
-    /// item `<key_item_id>.cert`). При коннекте аутентификация пойдёт по
-    /// сертификату (подпись делает агент, приватник не покидает ядро).
+    /// Attaches an OpenSSH user certificate to the key `key_item_id` (stored as
+    /// the item `<key_item_id>.cert`). At connect time authentication will use the
+    /// certificate (the agent does the signing, the private key never leaves the core).
     pub fn import_ssh_certificate(
         &self,
         vault_id: String,
         key_item_id: String,
         cert_openssh: String,
     ) -> Result<(), FfiError> {
-        // валидируем сертификат
+        // validate the certificate
         unissh_ssh_agent::ssh_key::Certificate::from_openssh(cert_openssh.trim())
             .map_err(|_| FfiError::ssh("invalid certificate"))?;
         let mut guard = self.locked_state();
@@ -2560,9 +2560,9 @@ impl Core {
         Ok(())
     }
 
-    /// Возвращает **публичный** ключ (OpenSSH) и его SHA256-отпечаток для
-    /// существующего item-ключа — чтобы UI мог показать/скопировать его в
-    /// `authorized_keys`. Приватник наружу не отдаётся.
+    /// Returns the **public** key (OpenSSH) and its SHA256 fingerprint for
+    /// an existing key item — so the UI can show/copy it into
+    /// `authorized_keys`. The private key is not handed out.
     pub fn get_public_key(
         &self,
         vault_id: String,
@@ -2585,8 +2585,8 @@ impl Core {
         if item.item_type != ITEM_TYPE_SSH_KEY {
             return Err(FfiError::other("item is not an SSH key"));
         }
-        // Извлекаем публичный ключ через временный агент (приватник в Zeroizing
-        // DecryptedItem; временный агент дропается по выходу).
+        // Extract the public key via a temporary agent (the private key is in a Zeroizing
+        // DecryptedItem; the temporary agent is dropped on exit).
         let mut tmp = InMemoryAgent::new();
         tmp.add_from_item(b"x".to_vec(), &item)
             .map_err(FfiError::ssh)?;
@@ -2603,11 +2603,11 @@ impl Core {
         })
     }
 
-    /// ⚠️ Экспортирует **приватный** OpenSSH-ключ item'а наружу (бэкап/миграция).
-    /// По умолчанию приватник из ядра не отдаётся; это явный, по запросу
-    /// пользователя, экспорт его собственных данных. Возвращаемая строка уходит
-    /// за FFI-границу и не зануляется — UI отвечает за её судьбу (предупредить,
-    /// не логировать, писать в файл, не в общий буфер по умолчанию).
+    /// ⚠️ Exports an item's **private** OpenSSH key out (backup/migration).
+    /// By default the private key is not handed out of the core; this is an explicit, user-
+    /// requested export of their own data. The returned string crosses
+    /// the FFI boundary and is not zeroized — the UI is responsible for its fate (warn,
+    /// don't log, write to a file, not to the shared clipboard by default).
     pub fn export_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2628,12 +2628,12 @@ impl Core {
             .map_err(|_| FfiError::other("key is not valid UTF-8"))
     }
 
-    /// Ротирует SSH-ключ **на том же item id**: генерирует новую пару Ed25519 и
-    /// перезаписывает приватник под тем же идентификатором, поэтому все хосты,
-    /// ссылающиеся на этот item, автоматически начинают использовать новый ключ —
-    /// без «замены везде». Возвращает **новый публичный** ключ (его надо
-    /// установить на серверы). Привязанный сертификат (если был) после ротации
-    /// больше не соответствует ключу — UI должен предупредить о переустановке.
+    /// Rotates an SSH key **on the same item id**: generates a new Ed25519 pair and
+    /// overwrites the private key under the same identifier, so all hosts that
+    /// reference this item automatically start using the new key —
+    /// without "replacing it everywhere". Returns the **new public** key (which must be
+    /// installed on the servers). An attached certificate (if any) no longer matches
+    /// the key after rotation — the UI should warn about reinstalling it.
     pub fn rotate_ssh_key(&self, vault_id: String, item_id: String) -> Result<String, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2643,7 +2643,7 @@ impl Core {
             &resolve_vid(&state.storage, &vault_id),
         )
         .map_err(FfiError::other)?;
-        // Ключ должен существовать и быть SSH-ключом — нельзя «ротировать» пустоту.
+        // The key must exist and be an SSH key — you can't "rotate" nothing.
         let existing = vault
             .get_item(item_id.as_bytes())
             .map_err(FfiError::other)?
@@ -2659,9 +2659,9 @@ impl Core {
                 private_pem.as_bytes(),
             )
             .map_err(FfiError::other)?;
-        // Привязанный сертификат больше не соответствует новой паре — удаляем его,
-        // иначе `load_key_into_agent` переприкрепит несоответствующий cert при
-        // следующем коннекте и cert-аутентификация молча сломается.
+        // The attached certificate no longer matches the new pair — remove it,
+        // otherwise `load_key_into_agent` would re-attach the mismatched cert on the
+        // next connect and cert authentication would silently break.
         let cert = cert_item_id(&item_id);
         if vault
             .get_item(cert.as_bytes())
@@ -2672,18 +2672,18 @@ impl Core {
                 .delete_item(cert.as_bytes())
                 .map_err(FfiError::other)?;
         }
-        // Выгружаем старый ключ из in-memory агента (как delete_item/rename_item),
-        // иначе коннекты в этой сессии продолжат использовать прежнюю пару, т.к.
-        // `load_key_into_agent` короткозамыкается на `agent.contains()`.
-        // A4a namespace: агент хранит ключ под agent_key_id(vault_id,item_id), а не
-        // под голым item_id — выгружать надо тем же ключом, иначе remove — no-op и
-        // отозванный/ротированный приватник остаётся живым в агенте до конца сессии.
+        // Unload the old key from the in-memory agent (like delete_item/rename_item),
+        // otherwise connects in this session would keep using the previous pair, since
+        // `load_key_into_agent` short-circuits on `agent.contains()`.
+        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+        // a revoked/rotated private key stays alive in the agent until the end of the session.
         state.agent.remove(&agent_key_id(&vault_id, &item_id));
         Ok(public)
     }
 
-    /// Переименовывает (перемещает) item на новый id. Переносит привязанный
-    /// сертификат (`<key>.cert`) и выгружает старый ключ из агента.
+    /// Renames (moves) an item to a new id. Transfers the attached
+    /// certificate (`<key>.cert`) and unloads the old key from the agent.
     pub fn rename_item(
         &self,
         vault_id: String,
@@ -2701,7 +2701,7 @@ impl Core {
         vault
             .rename_item(item_id.as_bytes(), new_item_id.as_bytes())
             .map_err(map_vault_err)?;
-        // Перенести сертификат, если он был привязан к старому id.
+        // Transfer the certificate if it was attached to the old id.
         let old_cert = cert_item_id(&item_id);
         if vault
             .get_item(old_cert.as_bytes())
@@ -2712,14 +2712,14 @@ impl Core {
                 .rename_item(old_cert.as_bytes(), cert_item_id(&new_item_id).as_bytes())
                 .map_err(map_vault_err)?;
         }
-        // A4a namespace: агент хранит ключ под agent_key_id(vault_id,item_id), а не
-        // под голым item_id — выгружать надо тем же ключом, иначе remove — no-op и
-        // отозванный/ротированный приватник остаётся живым в агенте до конца сессии.
+        // A4a namespace: the agent stores the key under agent_key_id(vault_id,item_id), not
+        // under the bare item_id — it must be unloaded with the same key, otherwise remove is a no-op and
+        // a revoked/rotated private key stays alive in the agent until the end of the session.
         state.agent.remove(&agent_key_id(&vault_id, &item_id));
         Ok(())
     }
 
-    /// Список items волта.
+    /// List of a vault's items.
     pub fn list_items(&self, vault_id: String) -> Result<Vec<ItemInfo>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -2730,8 +2730,8 @@ impl Core {
         )
         .map_err(FfiError::other)?;
         let metas = vault.list_items().map_err(FfiError::other)?;
-        // Множество всех id — чтобы дёшево (без расшифровки) определить, есть ли у
-        // ключа привязанный сертификат (`<key>.cert`).
+        // The set of all ids — to cheaply (without decryption) determine whether a
+        // key has an attached certificate (`<key>.cert`).
         let ids: std::collections::HashSet<&[u8]> =
             metas.iter().map(|m| m.item_id.as_slice()).collect();
         Ok(metas
@@ -2752,8 +2752,8 @@ impl Core {
             .collect())
     }
 
-    /// Подключается по SSH (опционально через ProxyJump-цепочку) и выполняет
-    /// команду. Ключи берутся из волта в агент; наружу не отдаются.
+    /// Connects over SSH (optionally through a ProxyJump chain) and runs
+    /// a command. Keys are loaded from the vault into the agent; they are not handed out.
     #[allow(clippy::too_many_arguments)]
     pub fn ssh_exec(
         &self,
@@ -2764,8 +2764,8 @@ impl Core {
         command: String,
         jumps: Vec<JumpHost>,
     ) -> Result<SshExecResult, FfiError> {
-        // Коннект+аутентификация — под локом Core (нужны agent+storage). Затем
-        // лок отпускаем, и команду выполняем уже без него.
+        // Connect + authentication — under the Core lock (agent+storage are needed). Then
+        // we release the lock and run the command without it.
         let client = self.connect_session(&auth, &jumps, host, port, user)?;
         let output = self
             .rt
@@ -2780,9 +2780,9 @@ impl Core {
         })
     }
 
-    /// Потоковый exec (без PTY): stdout/stderr стримятся в `observer` раздельно,
-    /// код возврата — через `on_exit`. Возвращает хэндл для stdin/закрытия/опроса
-    /// завершения. Лок Core держится только на время коннекта.
+    /// Streaming exec (no PTY): stdout/stderr are streamed to `observer` separately,
+    /// the exit code via `on_exit`. Returns a handle for stdin/closing/polling
+    /// for completion. The Core lock is held only for the duration of the connect.
     #[allow(clippy::too_many_arguments)]
     pub fn ssh_exec_stream(
         &self,
@@ -2807,16 +2807,16 @@ impl Core {
         }))
     }
 
-    /// Задаёт интервал SSH keepalive (секунды) для последующих подключений;
-    /// `0` — выключить. Глобальная настройка (не требует разблокировки): касается
-    /// всех новых сессий, туннелей и бродкаста. На уже открытые не влияет.
+    /// Sets the SSH keepalive interval (seconds) for subsequent connections;
+    /// `0` — off. A global setting (does not require an unlock): it affects
+    /// all new sessions, tunnels and broadcasts. It does not affect already-open ones.
     pub fn set_keepalive_secs(&self, secs: u64) {
         unissh_ssh_transport::set_keepalive_secs(secs);
     }
 
-    /// Открывает интерактивную PTY-сессию. Вывод терминала стримится в
-    /// `observer` (callback). Возвращает объект сессии для ввода/ресайза/закрытия.
-    /// Лок Core держится только на время коннекта, не на время сессии.
+    /// Opens an interactive PTY session. Terminal output is streamed to
+    /// `observer` (a callback). Returns a session object for input/resize/close.
+    /// The Core lock is held only for the connect, not for the duration of the session.
     #[allow(clippy::too_many_arguments)]
     pub fn open_session(
         &self,
@@ -2846,11 +2846,11 @@ impl Core {
         }))
     }
 
-    /// Открывает интерактивную PTY-сессию с авто-реконнектом: при обрыве (ошибка
-    /// `write`) или по `reconnect()` сессия переустанавливается до `max_retries`
-    /// раз с линейным backoff (`backoff_ms`). Креды переразрешаются из волта на
-    /// каждой попытке; `HostKeyMismatch` не реконнектится. Начальный коннект тоже
-    /// с ретраями; ошибка после исчерпания попыток возвращается.
+    /// Opens an interactive PTY session with auto-reconnect: on a drop (a `write`
+    /// error) or on `reconnect()` the session is re-established up to `max_retries`
+    /// times with linear backoff (`backoff_ms`). Credentials are re-resolved from the vault on
+    /// each attempt; `HostKeyMismatch` is not reconnected. The initial connect also
+    /// uses retries; the error after exhausting attempts is returned.
     #[allow(clippy::too_many_arguments)]
     pub fn open_reconnecting_session(
         &self,
@@ -2888,15 +2888,15 @@ impl Core {
         Ok(session)
     }
 
-    /// Выполняет одну команду на нескольких хостах. Коннекты — последовательно
-    /// (под локом Core), выполнение — конкурентно. Ошибка по хосту не валит
-    /// остальные: она кладётся в `error` соответствующего результата.
+    /// Runs a single command on multiple hosts. Connects happen sequentially
+    /// (under the Core lock), execution is concurrent. An error on one host does not fail
+    /// the others: it is placed in the `error` of the corresponding result.
     ///
-    /// `max_concurrency` ограничивает число одновременно выполняемых команд
-    /// (0 = без лимита). `timeout_secs` — per-host дедлайн на выполнение команды
-    /// (0 = без таймаута); по истечении результат помечается `timed_out`, хост
-    /// отключается, остальные продолжают. Защищает флот от исчерпания ресурсов и
-    /// от зависших хостов.
+    /// `max_concurrency` limits the number of commands executing at once
+    /// (0 = no limit). `timeout_secs` is the per-host deadline for command execution
+    /// (0 = no timeout); on expiry the result is marked `timed_out`, the host
+    /// is disconnected, and the rest continue. Protects the fleet from resource exhaustion and
+    /// from hung hosts.
     pub fn ssh_exec_multi(
         &self,
         targets: Vec<MultiExecTarget>,
@@ -2908,7 +2908,7 @@ impl Core {
             return Err(FfiError::Locked);
         }
 
-        // Фаза коннекта (под локом, последовательно).
+        // Connect phase (under the lock, sequential).
         let mut connected: Vec<(String, SshClient)> = Vec::new();
         let mut results: Vec<MultiExecResult> = Vec::new();
         for t in &targets {
@@ -2926,7 +2926,7 @@ impl Core {
             }
         }
 
-        // Фаза выполнения (конкурентно, с опциональными лимитом и таймаутом).
+        // Execution phase (concurrent, with an optional limit and timeout).
         let timeout_dur =
             (timeout_secs > 0).then(|| tokio::time::Duration::from_secs(timeout_secs as u64));
         let sem = (max_concurrency > 0)
@@ -2937,15 +2937,15 @@ impl Core {
                 let cmd = command.clone();
                 let sem = sem.clone();
                 set.spawn(async move {
-                    // Пермит держим на всё время exec → не больше max_concurrency
-                    // команд одновременно (acquire_owned не падает: семафор не
-                    // закрывается).
+                    // Hold the permit for the whole exec → no more than max_concurrency
+                    // commands at once (acquire_owned doesn't fail: the semaphore is not
+                    // closed).
                     let _permit = match &sem {
                         Some(s) => Some(s.clone().acquire_owned().await.expect("semaphore open")),
                         None => None,
                     };
                     let started = std::time::Instant::now();
-                    // None → команда не уложилась в таймаут.
+                    // None → the command did not fit within the timeout.
                     let outcome = match timeout_dur {
                         Some(d) => tokio::time::timeout(d, client.exec(&cmd)).await.ok(),
                         None => Some(client.exec(&cmd).await),
@@ -2998,15 +2998,15 @@ impl Core {
         Ok(results)
     }
 
-    /// Строит цели multi-exec из профилей волта, чьи теги совпадают с запросом
-    /// (`match_all`: все теги запроса ⊆ тегов профиля; иначе пересечение). Пустой
-    /// запрос → пустой результат. Это выборка целей, не RBAC.
+    /// Builds multi-exec targets from the vault's profiles whose tags match the query
+    /// (`match_all`: all query tags ⊆ the profile's tags; otherwise an intersection). An empty
+    /// query → an empty result. This is target selection, not RBAC.
     ///
-    /// `PromptPassword` исключается (нет заранее известного пароля — иначе
-    /// пакетный прогон делал бы live-коннект с пустым паролем). `Personal`
-    /// резолвится per-host (привязка + анти-редирект): привязанный включается с
-    /// разрешёнными user+auth, непривязанный/редиректнутый молча пропускается
-    /// (подключить индивидуально). Пустой пароль в пакет не уходит никогда.
+    /// `PromptPassword` is excluded (there is no known password in advance — otherwise
+    /// a batch run would make a live connect with an empty password). `Personal`
+    /// is resolved per-host (binding + anti-redirect): a bound one is included with
+    /// the resolved user+auth, an unbound/redirected one is silently skipped
+    /// (connect individually). An empty password never goes into the batch.
     pub fn select_targets_by_tags(
         &self,
         vault_id: String,
@@ -3051,8 +3051,8 @@ impl Core {
         Ok(out)
     }
 
-    /// Выполняет команду на всех профилях с подходящими тегами (см.
-    /// [`Core::select_targets_by_tags`] и [`Core::ssh_exec_multi`]).
+    /// Runs a command on all profiles with matching tags (see
+    /// [`Core::select_targets_by_tags`] and [`Core::ssh_exec_multi`]).
     #[allow(clippy::too_many_arguments)]
     pub fn ssh_exec_by_tags(
         &self,
@@ -3067,11 +3067,11 @@ impl Core {
         self.ssh_exec_multi(targets, command, max_concurrency, timeout_secs)
     }
 
-    /// Раскладывает один blob (`data`) в `remote_path` на множестве хостов через
-    /// SFTP. `make_parent_dirs` — попытаться создать родительский каталог (ошибка
-    /// «уже существует» проглатывается). Коннекты последовательно (под локом
-    /// Core), запись конкурентно с `max_concurrency`/per-host `timeout_secs`.
-    /// Ошибка по хосту не валит остальные — она в `error` его результата.
+    /// Lays out a single blob (`data`) to `remote_path` on multiple hosts via
+    /// SFTP. `make_parent_dirs` — try to create the parent directory (an "already
+    /// exists" error is swallowed). Connects are sequential (under the Core
+    /// lock), the write is concurrent with `max_concurrency`/per-host `timeout_secs`.
+    /// An error on one host does not fail the others — it is in the `error` of its result.
     #[allow(clippy::too_many_arguments)]
     pub fn sftp_put_multi(
         &self,
@@ -3114,7 +3114,7 @@ impl Core {
                         Some(s) => Some(s.clone().acquire_owned().await.expect("semaphore open")),
                         None => None,
                     };
-                    // Весь put (open_sftp+mkdir+write) под единым таймаутом.
+                    // The whole put (open_sftp+mkdir+write) is under a single timeout.
                     let res = match timeout_dur {
                         Some(d) => {
                             match tokio::time::timeout(
@@ -3150,10 +3150,10 @@ impl Core {
         Ok(results)
     }
 
-    /// Открывает broadcast (cluster-ssh): по PTY-сессии на каждый хост; общий ввод
-    /// фан-аутится во все. Вывод каждого хоста идёт в `observer` с его индексом.
-    /// Хост, не прошедший коннект/открытие shell, отражается в `statuses()`, но не
-    /// валит остальные. Лок Core держится только на фазу коннекта.
+    /// Opens a broadcast (cluster-ssh): a PTY session per host; shared input
+    /// is fanned out to all. Each host's output goes to `observer` with its index.
+    /// A host that failed to connect/open a shell is reflected in `statuses()` but does not
+    /// fail the others. The Core lock is held only for the connect phase.
     pub fn open_broadcast(
         &self,
         targets: Vec<MultiExecTarget>,
@@ -3209,12 +3209,12 @@ impl Core {
         }))
     }
 
-    // --- группы хостов ---
+    // --- host groups ---
 
-    /// Сохраняет/обновляет группу хостов (item типа «группа»). Только ссылки на
-    /// профили/группы; секретов внутри нет. Отвергает само-членство, само-
-    /// родительство и пустой `group_id`; `ensure_item_type` защищает от кросс-тип
-    /// затирания.
+    /// Saves/updates a host group (an item of type "group"). Only references to
+    /// profiles/groups; no secrets inside. Rejects self-membership, self-
+    /// parenthood and an empty `group_id`; `ensure_item_type` guards against cross-type
+    /// overwriting.
     pub fn save_group(&self, vault_id: String, group: ServerGroup) -> Result<(), FfiError> {
         if group.group_id.is_empty() {
             return Err(FfiError::other("group_id must not be empty"));
@@ -3252,7 +3252,7 @@ impl Core {
         Ok(())
     }
 
-    /// Список групп волта (битый JSON пропускается, tombstones не видны).
+    /// List of a vault's groups (broken JSON is skipped, tombstones are not visible).
     pub fn list_groups(&self, vault_id: String) -> Result<Vec<ServerGroup>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3279,7 +3279,7 @@ impl Core {
         Ok(out)
     }
 
-    /// Возвращает одну группу.
+    /// Returns a single group.
     pub fn get_group(&self, vault_id: String, group_id: String) -> Result<ServerGroup, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3298,8 +3298,8 @@ impl Core {
         Ok(group_to_public(group_id, stored))
     }
 
-    /// Удаляет группу (tombstone). Висячие `parent_id`/`member_id` ссылки на неё
-    /// у других групп остаются и игнорируются при резолве.
+    /// Deletes a group (tombstone). Dangling `parent_id`/`member_id` references to it
+    /// in other groups remain and are ignored during resolution.
     pub fn delete_group(&self, vault_id: String, group_id: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3315,9 +3315,9 @@ impl Core {
         Ok(())
     }
 
-    /// Сухой прогон: разворачивает группу (рекурсивно, с защитой от циклов) в
-    /// план целей БЕЗ коннекта, загрузки ключей в агент и расшифровки паролей.
-    /// Для предпросмотра перед разрушительной массовой командой.
+    /// A dry run: expands the group (recursively, with cycle protection) into
+    /// a target plan WITHOUT connecting, loading keys into the agent or decrypting passwords.
+    /// For a preview before a destructive bulk command.
     pub fn dry_run_group(
         &self,
         vault_id: String,
@@ -3326,9 +3326,9 @@ impl Core {
         Ok(self.resolve_group(&vault_id, &group_id)?.1)
     }
 
-    /// Выполняет команду на всех хостах группы (вложенные группы раскрываются).
-    /// Нерезолвящиеся члены (висячая ссылка, цикл, `PromptPassword`) попадают в
-    /// результат как `error`, а не теряются молча.
+    /// Runs a command on all hosts in the group (nested groups are expanded).
+    /// Members that don't resolve (a dangling reference, a cycle, `PromptPassword`) go into
+    /// the result as an `error` rather than being silently lost.
     pub fn ssh_exec_group(
         &self,
         vault_id: String,
@@ -3365,11 +3365,11 @@ impl Core {
         Ok(results)
     }
 
-    // --- аудит целостности ---
+    // --- integrity audit ---
 
-    /// Read-only аудит целостности волта: пере-проверяет подписи vault-записи и
-    /// всех items (включая tombstones) и сверяет автора с владельцем. Ловит
-    /// порчу блобов и подмену автора. Отчёт не содержит секретов/plaintext.
+    /// Read-only vault integrity audit: re-verifies the signatures of the vault record and
+    /// of all items (including tombstones) and checks the author against the owner. Catches
+    /// blob corruption and author spoofing. The report contains no secrets/plaintext.
     pub fn verify_vault_integrity(
         &self,
         vault_id: String,
@@ -3386,8 +3386,8 @@ impl Core {
         Ok(integrity_report_to_ffi(report))
     }
 
-    /// Структурная проверка БД инстанса: `integrity_check` + орфаны + доменные
-    /// инварианты. Read-only, отчёт без секретов.
+    /// Structural check of the instance DB: `integrity_check` + orphans + domain
+    /// invariants. Read-only, a report with no secrets.
     pub fn check_consistency(&self) -> Result<DbConsistencyReport, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3427,11 +3427,11 @@ impl Core {
         })
     }
 
-    // --- проброс портов (туннели) ---
+    // --- port forwarding (tunnels) ---
 
-    /// Локальный форвард: слушает `local_bind` (например `127.0.0.1:0`) и
-    /// туннелирует на `remote_host:remote_port` со стороны сервера. Туннель живёт,
-    /// пока живёт возвращённый объект (или до `close`).
+    /// Local forward: listens on `local_bind` (e.g. `127.0.0.1:0`) and
+    /// tunnels to `remote_host:remote_port` from the server side. The tunnel lives
+    /// as long as the returned object lives (or until `close`).
     #[allow(clippy::too_many_arguments)]
     pub fn open_local_forward(
         &self,
@@ -3458,8 +3458,8 @@ impl Core {
         }))
     }
 
-    /// Динамический форвард (SOCKS5) на `local_bind`. **Адрес должен быть
-    /// loopback** (SOCKS5 без аутентификации). Туннель живёт до `close`.
+    /// Dynamic forward (SOCKS5) on `local_bind`. **The address must be
+    /// loopback** (SOCKS5 without authentication). The tunnel lives until `close`.
     #[allow(clippy::too_many_arguments)]
     pub fn open_dynamic_forward(
         &self,
@@ -3484,9 +3484,9 @@ impl Core {
         }))
     }
 
-    /// Удалённый форвард: сервер слушает `remote_bind:remote_port` и доставляет
-    /// входящие на локальный `local_host:local_port`. `bind_address` вернёт
-    /// `remote_bind:<фактический порт>`. Туннель живёт до `close`.
+    /// Remote forward: the server listens on `remote_bind:remote_port` and delivers
+    /// incoming connections to the local `local_host:local_port`. `bind_address` returns
+    /// `remote_bind:<actual port>`. The tunnel lives until `close`.
     #[allow(clippy::too_many_arguments)]
     pub fn open_remote_forward(
         &self,
@@ -3515,13 +3515,13 @@ impl Core {
 
     // --- SFTP ---
 
-    /// Открывает SFTP-сессию к хосту (опц. через ProxyJump). Сессия живёт, пока
-    /// жив возвращённый объект (или до `close`).
+    /// Opens an SFTP session to a host (optionally through ProxyJump). The session lives as
+    /// long as the returned object lives (or until `close`).
     #[allow(clippy::too_many_arguments)]
-    /// `parallelism` — сколько SFTP-каналов держать поверх одного соединения для
-    /// параллельных передач (K из настроек). Клампится в [1, 16]; 1 = прежнее строго
-    /// последовательное поведение. Первый канал открывается сразу, остальные —
-    /// лениво по мере спроса (см. [`SftpFfi`]).
+    /// `parallelism` — how many SFTP channels to keep over a single connection for
+    /// parallel transfers (K from settings). Clamped to [1, 16]; 1 = the previous strictly
+    /// sequential behavior. The first channel opens immediately, the rest —
+    /// lazily on demand (see [`SftpFfi`]).
     pub fn open_sftp(
         &self,
         host: String,
@@ -3558,12 +3558,12 @@ impl Core {
         }))
     }
 
-    // --- профили соединений («хосты») ---
+    // --- connection profiles ("hosts") ---
 
-    /// Сохраняет/обновляет профиль соединения (хранится зашифрованным item-ом
-    /// типа «соединение» в волте). Сам секрет в профиль не встраивается: для
-    /// парольной аутентификации хранится только ссылка на пароль-item; jump-хост
-    /// с inline-паролем (`AuthMethod::Password`) сохранить нельзя — ошибка.
+    /// Saves/updates a connection profile (stored as an encrypted item
+    /// of type "connection" in the vault). The secret itself is not embedded in the profile: for
+    /// password authentication only a reference to the password item is stored; a jump host
+    /// with an inline password (`AuthMethod::Password`) cannot be saved — an error.
     pub fn save_connection(
         &self,
         vault_id: String,
@@ -3586,9 +3586,9 @@ impl Core {
         if profile_id.is_empty() {
             return Err(FfiError::other("profile_id must not be empty"));
         }
-        // Пустой uid = создание нового профиля → минтим неизменяемый id. Непустой
-        // (правка: UI вернул uid из get_connection) сохраняем как есть — uid не
-        // меняется при смене host/label.
+        // Empty uid = creating a new profile → mint an immutable id. A non-empty one
+        // (an edit: the UI returned the uid from get_connection) is kept as-is — the uid does not
+        // change when host/label change.
         let uid = if uid.is_empty() {
             mint_profile_uid()
         } else {
@@ -3631,7 +3631,7 @@ impl Core {
             &resolve_vid(&state.storage, &vault_id),
         )
         .map_err(FfiError::other)?;
-        // Forward-compat: перенести неизвестные поля существующего профиля.
+        // Forward-compat: carry over the unknown fields of the existing profile.
         stored.extra = preserved_extra::<StoredProfile>(
             &vault,
             profile_id.as_bytes(),
@@ -3645,7 +3645,7 @@ impl Core {
         Ok(())
     }
 
-    /// Список профилей соединений в волте.
+    /// List of connection profiles in a vault.
     pub fn list_connections(&self, vault_id: String) -> Result<Vec<ConnectionProfile>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3673,7 +3673,7 @@ impl Core {
         Ok(out)
     }
 
-    /// Возвращает один профиль соединения.
+    /// Returns a single connection profile.
     pub fn get_connection(
         &self,
         vault_id: String,
@@ -3697,7 +3697,7 @@ impl Core {
         Ok(stored_to_profile(&vault_id, profile_id, stored))
     }
 
-    /// Удаляет профиль соединения.
+    /// Deletes a connection profile.
     pub fn delete_connection(&self, vault_id: String, profile_id: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3715,9 +3715,9 @@ impl Core {
 
     // ---------- identities (personal SSH creds) ----------
 
-    /// Сохраняет (создаёт или обновляет) личную идентичность. В контент item
-    /// пишется только `StoredIdentity` (username + ссылки на ключ/пароль-item),
-    /// сам секрет не встраивается. `identity_id` — item_id в волте.
+    /// Saves (creates or updates) a personal identity. Into the item content
+    /// only `StoredIdentity` is written (username + references to a key/password item),
+    /// the secret itself is not embedded. `identity_id` is the item_id in the vault.
     pub fn save_identity(&self, vault_id: String, identity: Identity) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3784,7 +3784,7 @@ impl Core {
         Ok(())
     }
 
-    /// Возвращает одну идентичность по id.
+    /// Returns a single identity by id.
     pub fn get_identity(
         &self,
         vault_id: String,
@@ -3808,7 +3808,7 @@ impl Core {
         Ok(stored.into_identity(identity_id))
     }
 
-    /// Список личных идентичностей в волте.
+    /// List of personal identities in a vault.
     pub fn list_identities(&self, vault_id: String) -> Result<Vec<Identity>, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3832,7 +3832,7 @@ impl Core {
         Ok(out)
     }
 
-    /// Удаляет личную идентичность.
+    /// Deletes a personal identity.
     pub fn delete_identity(&self, vault_id: String, identity_id: String) -> Result<(), FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -3850,16 +3850,16 @@ impl Core {
 
     // ---------- identity bindings (personal vault ↔ shared host) ----------
 
-    /// Создаёт/обновляет привязку идентичности к shared-хосту в ЛИЧНОМ волте.
-    /// item_id детерминирован от (team_vault_id, profile_uid) → одна привязка на
-    /// пару. `destination_pin` задаёт вызывающий (отрендеренный host:port на
-    /// момент привязки) — это анти-редирект-якорь.
+    /// Creates/updates a binding of an identity to a shared host in the PERSONAL vault.
+    /// The item_id is derived from (team_vault_id, profile_uid) → one binding per
+    /// pair. `destination_pin` is set by the caller (the rendered host:port at
+    /// bind time) — this is the anti-redirect anchor.
     ///
-    /// First-bind guard: если привязка уже есть с ДРУГИМ закреплённым
-    /// назначением, пере-пин требует явного `allow_rebind=true` — молча не
-    /// перепривязываем на изменившийся хост (анти-редирект на этапе bind). Первая
-    /// привязка и идемпотентный пере-пин (то же назначение, напр. смена только
-    /// идентичности) не требуют флага.
+    /// First-bind guard: if a binding already exists with a DIFFERENT pinned
+    /// destination, re-pinning requires an explicit `allow_rebind=true` — we do not silently
+    /// rebind to a changed host (anti-redirect at bind time). The first
+    /// binding and an idempotent re-pin (the same destination, e.g. changing only
+    /// the identity) do not require the flag.
     pub fn set_binding(
         &self,
         personal_vault_id: String,
@@ -3892,7 +3892,7 @@ impl Core {
             &resolve_vid(&state.storage, &personal_vault_id),
         )
         .map_err(FfiError::other)?;
-        // First-bind guard: молча не перепривязываем на изменившееся назначение.
+        // First-bind guard: we do not silently rebind to a changed destination.
         if !allow_rebind {
             if let Some(existing) = vault
                 .get_item(item_id.as_bytes())
@@ -3916,7 +3916,7 @@ impl Core {
             destination_pin,
             extra: BTreeMap::new(),
         };
-        // Forward-compat: перенести неизвестные поля существующей привязки.
+        // Forward-compat: carry over the unknown fields of the existing binding.
         stored.extra =
             preserved_extra::<StoredBinding>(&vault, item_id.as_bytes(), ITEM_TYPE_BINDING, |sb| {
                 sb.extra
@@ -3928,7 +3928,7 @@ impl Core {
         Ok(())
     }
 
-    /// Возвращает привязку по (team_vault_id, profile_uid), если она есть.
+    /// Returns the binding for (team_vault_id, profile_uid), if any.
     pub fn get_binding(
         &self,
         personal_vault_id: String,
@@ -3956,7 +3956,7 @@ impl Core {
         Ok(Some(stored.into_binding()))
     }
 
-    /// Список всех привязок в личном волте.
+    /// List of all bindings in the personal vault.
     pub fn list_bindings(
         &self,
         personal_vault_id: String,
@@ -3983,7 +3983,7 @@ impl Core {
         Ok(out)
     }
 
-    /// Удаляет привязку по (team_vault_id, profile_uid).
+    /// Deletes the binding for (team_vault_id, profile_uid).
     pub fn delete_binding(
         &self,
         personal_vault_id: String,
@@ -4005,12 +4005,12 @@ impl Core {
         Ok(())
     }
 
-    /// Резолвит привязку для коннекта к shared-хосту с анти-редирект-проверкой:
-    /// сверяет `current_destination` (отрендеренный клиентом host:port на данный
-    /// момент) с закреплённым в привязке. `Redirected` означает, что shared-хост
-    /// переклеили после привязки — клиент показывает re-bind и НЕ шлёт личный
-    /// кред. `Matched` → логиниться идентичностью `identity_item_id`. Строгую
-    /// in-core-защиту при коннекте доведёт Personal-auth (B4).
+    /// Resolves a binding for connecting to a shared host with an anti-redirect check:
+    /// compares `current_destination` (the host:port rendered by the client at this
+    /// moment) with the one pinned in the binding. `Redirected` means the shared host
+    /// was re-pointed after binding — the client shows re-bind and does NOT send the personal
+    /// credential. `Matched` → log in with the identity `identity_item_id`. Strict
+    /// in-core protection at connect time is finished by Personal-auth (B4).
     pub fn resolve_host_binding(
         &self,
         personal_vault_id: String,
@@ -4022,13 +4022,13 @@ impl Core {
         Ok(resolve_binding(binding.as_ref(), &current_destination))
     }
 
-    /// Ищет, в КАКОМ приватном волте аккаунта лежит привязка к хосту
-    /// `(team_vault_id, profile_uid)` — по детерминированному id binding-item'а. Это
-    /// метаданная-проверка (`item_type`/`tombstone` открыты, БЕЗ расшифровки): первый
-    /// волт, где такой binding-item жив, и держит привязку+идентичность (co-location).
-    /// Так разные хосты могут логиниться идентичностями из РАЗНЫХ приватных волтов
-    /// (per-context) без единого «личного волта». Возвращает display-id волта (hex
-    /// для cloud, UTF-8 для local — как `list_vaults`).
+    /// Finds WHICH of the account's private vaults holds the binding for the host
+    /// `(team_vault_id, profile_uid)` — by the binding item's deterministic id. This is
+    /// a metadata check (`item_type`/`tombstone` are public, WITHOUT decryption): the first
+    /// vault where such a binding item is alive holds the binding + the identity (co-location).
+    /// This way different hosts can log in with identities from DIFFERENT private vaults
+    /// (per-context) without a single "personal vault". Returns the vault's display id (hex
+    /// for cloud, UTF-8 for local — like `list_vaults`).
     fn find_binding_vault(
         &self,
         team_vault_id: &str,
@@ -4054,18 +4054,18 @@ impl Core {
         Ok(None)
     }
 
-    /// Разрешает Personal-аутентификацию для коннекта к shared-хосту (B4):
-    /// находит волт с привязкой (co-location, [`Self::find_binding_vault`]), резолвит по
-    /// (`team_vault_id`, `profile_uid`) и ПРОВЕРЯЕТ анти-редирект против
-    /// `current_destination`. Личный кред разворачивается ТОЛЬКО если назначение
-    /// совпало с закреплённым — при `Redirected` возвращается ошибка, и клиент
-    /// НЕ шлёт кред на переклеенный хост (in-core enforcement). При `Unbound` —
-    /// ошибка «нужно связать идентичность». Собирает vault-квалифицированный
-    /// [`AuthMethod`] из личной идентичности + username (identity → fallback
-    /// профиля → account-default).
+    /// Resolves Personal authentication for connecting to a shared host (B4):
+    /// finds the vault holding the binding (co-location, [`Self::find_binding_vault`]), resolves by
+    /// (`team_vault_id`, `profile_uid`) and CHECKS anti-redirect against
+    /// `current_destination`. The personal credential is unwrapped ONLY if the destination
+    /// matched the pinned one — on `Redirected` an error is returned, and the client
+    /// does NOT send the credential to the re-pointed host (in-core enforcement). On `Unbound` —
+    /// an error "an identity must be linked". Assembles a vault-qualified
+    /// [`AuthMethod`] from the personal identity + a username (identity → profile
+    /// fallback → account-default).
     ///
-    /// Замечание: метод не держит лок сам — вызывает публичные геттеры
-    /// последовательно (иначе повторный захват `Mutex` был бы дедлоком).
+    /// Note: the method does not hold the lock itself — it calls the public getters
+    /// sequentially (otherwise a re-acquisition of the `Mutex` would be a deadlock).
     pub fn resolve_personal_auth(
         &self,
         team_vault_id: String,
@@ -4123,10 +4123,10 @@ impl Core {
         }
     }
 
-    /// Каноническое назначение для anti-redirect (bind-пин И connect-сверка).
-    /// Шаблон входит в назначение → его правка = смена назначения.
-    /// Клиент рендерит этим И `destination_pin` в [`Core::set_binding`], И
-    /// `current_destination` в [`Core::resolve_personal_auth`] — форматы совпадают.
+    /// Canonical destination for anti-redirect (the bind pin AND the connect check).
+    /// The template is part of the destination → editing it = changing the destination.
+    /// The client renders with this both `destination_pin` in [`Core::set_binding`] and
+    /// `current_destination` in [`Core::resolve_personal_auth`] — the formats match.
     pub fn personal_destination(
         &self,
         host: String,
@@ -4137,9 +4137,9 @@ impl Core {
         personal_destination(&host, port, username_template.as_deref(), &jumps)
     }
 
-    /// Финальный username коннекта по шаблону (`%u` → base_user), или
-    /// просто `base_user` без шаблона. Клиент применяет к
-    /// [`PersonalAuth::user`], используя тот же `username_template`, что и у пина.
+    /// The final connect username per the template (`%u` → base_user), or
+    /// just `base_user` without a template. The client applies it to
+    /// [`PersonalAuth::user`] using the same `username_template` as the pin.
     pub fn apply_username_template(
         &self,
         base_user: String,
@@ -4148,11 +4148,11 @@ impl Core {
         apply_username_template(&base_user, username_template.as_deref())
     }
 
-    /// Импортирует `~/.ssh/config`: для каждого конкретного `Host`-алиаса создаёт
-    /// профиль соединения с пустым `key_item_id` (ядро не читает файлы). Ключи,
-    /// указанные в `IdentityFile`, читает и импортирует UI-слой: он подтягивает
-    /// приватный ключ через [`Core::import_ssh_key`] и привязывает его к профилю
-    /// повторным [`Core::save_connection`]. Возвращает id созданных профилей.
+    /// Imports `~/.ssh/config`: for each concrete `Host` alias it creates
+    /// a connection profile with an empty `key_item_id` (the core does not read files). The keys
+    /// specified in `IdentityFile` are read and imported by the UI layer: it pulls in
+    /// the private key via [`Core::import_ssh_key`] and attaches it to the profile
+    /// with a second [`Core::save_connection`]. Returns the ids of the created profiles.
     pub fn import_ssh_config(
         &self,
         vault_id: String,
@@ -4169,8 +4169,8 @@ impl Core {
         .map_err(FfiError::other)?;
         let mut created = Vec::new();
         for alias in cfg.host_aliases() {
-            // Не затираем существующий item другого типа (напр. ключ с тем же id):
-            // такой алиас пропускаем, не включая в созданные.
+            // Don't overwrite an existing item of another type (e.g. a key with the same id):
+            // we skip such an alias, not counting it among the created ones.
             if ensure_item_type(
                 &state.storage,
                 &vault_id,
@@ -4181,10 +4181,10 @@ impl Core {
             {
                 continue;
             }
-            // #9: перезапись существующего профиля ДОЛЖНА сохранять его
-            // неизменяемый uid — на него завязаны personal-binding'и и hop_ref'ы
-            // (B2.1/B2.2); свежий uid осиротил бы их. Реюзаем uid существующего
-            // профиля, иначе минтим новый.
+            // #9: overwriting an existing profile MUST preserve its
+            // immutable uid — personal bindings and hop_refs depend on it
+            // (B2.1/B2.2); a fresh uid would orphan them. We reuse the existing
+            // profile's uid, otherwise we mint a new one.
             let existing_uid = vault
                 .get_item(alias.as_bytes())
                 .ok()
@@ -4216,23 +4216,23 @@ impl Core {
         Ok(created)
     }
 
-    /// Рендерит профили волта в текст `~/.ssh/config` (инверс
-    /// [`Core::import_ssh_config`]). Приватные ключи не экспортируются — только
-    /// Host/HostName/Port/User/ProxyJump; для ключевой аутентификации ключ
-    /// остаётся в волте (в конфиг идёт лишь комментарий). Round-trip-совместим с
-    /// импортом.
+    /// Renders a vault's profiles into `~/.ssh/config` text (the inverse of
+    /// [`Core::import_ssh_config`]). Private keys are not exported — only
+    /// Host/HostName/Port/User/ProxyJump; for key authentication the key
+    /// stays in the vault (only a comment goes into the config). Round-trip-compatible with
+    /// the import.
     pub fn export_ssh_config(&self, vault_id: String) -> Result<String, FfiError> {
         let profiles = self.list_connections(vault_id)?;
         let mut out = String::new();
         for p in profiles {
-            // OpenSSH `Host` — это паттерны, разделённые пробелами, со спецсмыслом
-            // у `* ? !`. profile_id с такими символами не представим как один
-            // алиас и сломал бы round-trip → пропускаем с пометкой.
+            // OpenSSH `Host` is patterns separated by spaces, with special meaning
+            // for `* ? !`. A profile_id with such characters can't be represented as a single
+            // alias and would break the round-trip → we skip it with a note.
             if p.profile_id
                 .contains(|c: char| c.is_whitespace() || matches!(c, '*' | '?' | '!'))
             {
                 out.push_str(&format!(
-                    "# пропущен профиль '{}': id содержит пробел/glob-символ\n\n",
+                    "# skipped profile '{}': id contains a space/glob character\n\n",
                     p.profile_id
                 ));
                 continue;
@@ -4251,7 +4251,7 @@ impl Core {
             }
             if let ProfileAuth::Key { key_item_id } = &p.auth {
                 out.push_str(&format!(
-                    "    # IdentityFile: ключ '{key_item_id}' в волте\n"
+                    "    # IdentityFile: key '{key_item_id}' in the vault\n"
                 ));
             }
             out.push('\n');
@@ -4259,10 +4259,10 @@ impl Core {
         Ok(out)
     }
 
-    /// Импортирует текст `~/.ssh/known_hosts`: каждый (host, port) с
-    /// не-hashed-именем закрепляется в TOFU-хранилище. Ключ канонизируется тем же
-    /// `russh`, что и пиннинг при живом коннекте (байт-совпадение). Hashed-строки
-    /// (`|1|…`) и невалидные пропускаются с подсчётом.
+    /// Imports `~/.ssh/known_hosts` text: each (host, port) with
+    /// a non-hashed name is pinned in the TOFU store. The key is canonicalized by the same
+    /// `russh` as pinning during a live connect (a byte match). Hashed lines
+    /// (`|1|…`) and invalid ones are skipped with a count.
     pub fn import_known_hosts(&self, text: String) -> Result<KnownHostsImport, FfiError> {
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
@@ -4280,7 +4280,7 @@ impl Core {
                 skipped_invalid += 1;
                 continue;
             };
-            // @cert-authority / @revoked маркеры — не обычный пин, пропускаем.
+            // @cert-authority / @revoked markers are not a normal pin — we skip them.
             if hosts.starts_with('@') {
                 skipped_invalid += 1;
                 continue;
@@ -4302,9 +4302,9 @@ impl Core {
                 if host.is_empty() {
                     continue;
                 }
-                // Глоб/негация (`*`/`?`/`!`) НЕ матчится точечным TOFU-lookup'ом —
-                // закреплять такой токен бессмысленно (мёртвая запись, вводящая в
-                // заблуждение «хост запиннен»). Пропускаем (учтётся как skipped).
+                // A glob/negation (`*`/`?`/`!`) does NOT match a point TOFU lookup —
+                // pinning such a token is pointless (a dead record that misleads
+                // with "the host is pinned"). We skip it (counted as skipped).
                 if host.contains(['*', '?', '!']) {
                     continue;
                 }
@@ -4328,9 +4328,9 @@ impl Core {
         })
     }
 
-    /// Импортирует экспорт сессий PuTTY (`.reg`): каждая SSH-сессия становится
-    /// профилем соединения. Не-SSH сессии, без хоста и коллизии id пропускаются.
-    /// `ProxyMethod=6` (SSH) с `ProxyHost` превращается в один jump-хоп.
+    /// Imports a PuTTY session export (`.reg`): each SSH session becomes
+    /// a connection profile. Non-SSH sessions, ones without a host, and id collisions are skipped.
+    /// `ProxyMethod=6` (SSH) with `ProxyHost` becomes a single jump hop.
     pub fn import_putty_sessions(
         &self,
         vault_id: String,
@@ -4353,8 +4353,8 @@ impl Core {
                 skipped += 1;
                 continue;
             }
-            // Любой существующий живой item с этим id (в т.ч. профиль того же
-            // типа) — не затираем; импорт только создаёт новое.
+            // Any existing live item with this id (including a profile of the same
+            // type) is not overwritten; the import only creates new ones.
             let occupied = state
                 .storage
                 .get_item(&vid, s.name.as_bytes())
@@ -4408,10 +4408,10 @@ impl Core {
         })
     }
 
-    /// Экспортирует волт в портативный зашифрованный файл-бэкап (НЕ синк): все
-    /// живые items расшифровываются и кладутся в bundle, который шифруется
-    /// AEAD-ключом, выведенным из `passphrase` (Argon2id). Открывается только
-    /// этой passphrase, без keyset исходного аккаунта.
+    /// Exports a vault into a portable encrypted backup file (NOT a sync): all
+    /// live items are decrypted and placed into a bundle, which is encrypted with an
+    /// AEAD key derived from the `passphrase` (Argon2id). It can be opened only
+    /// with this passphrase, without the source account's keyset.
     pub fn export_vault(&self, vault_id: String, passphrase: String) -> Result<Vec<u8>, FfiError> {
         let passphrase = Zeroizing::new(passphrase);
         let mut guard = self.locked_state();
@@ -4441,8 +4441,8 @@ impl Core {
         let params = KdfParams::recommended();
         let key = derive_key(passphrase.as_bytes(), &params).map_err(FfiError::other)?;
         let kdf_blob = params.to_blob().map_err(FfiError::other)?;
-        // AAD покрывает magic+version+kdf_blob → подмена KDF-параметров/заголовка
-        // детектится при расшифровке (а не только смена vault_id).
+        // The AAD covers magic+version+kdf_blob → tampering with the KDF params/header
+        // is detected on decryption (not just a change of vault_id).
         let aad = backup_aad(vault_id.as_bytes(), &kdf_blob);
         let ciphertext = aead_encrypt(&key, &bundle, &aad).map_err(FfiError::other)?;
 
@@ -4455,10 +4455,10 @@ impl Core {
         Ok(out)
     }
 
-    /// Импортирует бэкап в новый волт `new_vault_id` текущего инстанса: расшифровка
-    /// passphrase-ключом, items пере-шифровываются под новый VK и переподписываются
-    /// текущим владельцем. Неверная passphrase/порча → ошибка. Не затирает
-    /// существующий волт.
+    /// Imports a backup into a new vault `new_vault_id` of the current instance: decryption
+    /// with the passphrase key, items are re-encrypted under the new VK and re-signed
+    /// by the current owner. A wrong passphrase/corruption → an error. Does not overwrite
+    /// an existing vault.
     pub fn import_vault(
         &self,
         backup: Vec<u8>,
@@ -4477,17 +4477,17 @@ impl Core {
         let orig_vault_id = r.bytes()?;
         let ciphertext = r.bytes()?;
 
-        // KdfParams::from_blob отвергает запредельные параметры (DoS-защита) ДО
-        // деривации; AAD покрывает kdf_blob → подмена параметров не пройдёт.
+        // KdfParams::from_blob rejects out-of-bounds parameters (DoS protection) BEFORE
+        // derivation; the AAD covers kdf_blob → tampering with the parameters won't pass.
         let params = KdfParams::from_blob(kdf_blob).map_err(FfiError::other)?;
         let key = derive_key(passphrase.as_bytes(), &params).map_err(FfiError::other)?;
         let aad = backup_aad(orig_vault_id, kdf_blob);
-        // Неверная passphrase или порча (в т.ч. заголовка/KDF) → AEAD не сходится.
+        // A wrong passphrase or corruption (including of the header/KDF) → the AEAD does not verify.
         let bundle = Zeroizing::new(
             aead_decrypt(&key, ciphertext, &aad).map_err(|_| FfiError::InvalidCredentials)?,
         );
 
-        // Парсим bundle в owned-значения ДО транзакции (контент — в Zeroizing).
+        // Parse the bundle into owned values BEFORE the transaction (the content is in Zeroizing).
         let mut br = ByteReader::new(&bundle);
         let name = br.bytes()?.to_vec();
         let count = br.u32()?;
@@ -4501,8 +4501,8 @@ impl Core {
 
         let mut guard = self.locked_state();
         let state = guard.as_mut().ok_or(FfiError::Locked)?;
-        // Любой существующий volume-id (живой ИЛИ tombstone) занят: создать поверх
-        // нельзя (anti-rollback всё равно отвергнет), поэтому отдаём ясную ошибку.
+        // Any existing volume-id (live OR tombstone) is taken: creating over it
+        // is not allowed (anti-rollback would reject it anyway), so we return a clear error.
         if state
             .storage
             .get_vault(new_vault_id.as_bytes())
@@ -4511,8 +4511,8 @@ impl Core {
         {
             return Err(FfiError::AlreadyExists);
         }
-        // Атомарно: создание волта + все items в одной транзакции — частичный сбой
-        // не оставит полу-импортированный волт.
+        // Atomically: creating the vault + all items in a single transaction — a partial failure
+        // won't leave a half-imported vault.
         state
             .storage
             .transaction(|| {
@@ -4537,14 +4537,14 @@ impl Core {
 }
 
 impl Core {
-    /// Берёт лок состояния, восстанавливаясь после отравления мьютекса (данные
-    /// под локом — обычные, не инвариантные), чтобы единичная паника не
-    /// «заклинила» весь Core навсегда при вызовах через FFI.
+    /// Takes the state lock, recovering from mutex poisoning (the data
+    /// under the lock is ordinary, not invariant-bearing) so that a single panic does not
+    /// "jam" the entire Core forever on calls through the FFI.
     fn locked_state(&self) -> std::sync::MutexGuard<'_, Option<CoreState>> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Читает + расшифровывает текущее per-account состояние (A3.2), если есть.
+    /// Reads + decrypts the current per-account state (A3.2), if any.
     fn read_account_state(&self) -> Result<Option<AccountStatePayload>, FfiError> {
         let guard = self.locked_state();
         let state = guard.as_ref().ok_or(FfiError::Locked)?;
@@ -4563,9 +4563,9 @@ impl Core {
         }
     }
 
-    /// Read-modify-write per-account состояния (A3.2): расшифровать текущее (или
-    /// пустое), применить мутацию, пере-seal+sign с version+1, сохранить. Синкается
-    /// на устройства аккаунта при следующем sync_push.
+    /// Read-modify-write of the per-account state (A3.2): decrypt the current (or
+    /// an empty) one, apply the mutation, re-seal+sign with version+1, save. Synced
+    /// to the account's devices on the next sync_push.
     fn update_account_state(
         &self,
         mutate: impl FnOnce(&mut AccountStatePayload),
@@ -4597,9 +4597,9 @@ impl Core {
         Ok(())
     }
 
-    /// Коннект+аутентификация под локом Core (нужны agent+storage: ключи грузятся
-    /// в агент, пароли из волта разворачиваются в память ядра). Возвращает
-    /// владеемый клиент; вызывающий освобождает лок сразу после.
+    /// Connect + authentication under the Core lock (agent+storage are needed: keys are loaded
+    /// into the agent, vault passwords are unwrapped into the core's memory). Returns
+    /// an owned client; the caller releases the lock immediately after.
     fn connect_session(
         &self,
         auth: &AuthMethod,
@@ -4611,8 +4611,8 @@ impl Core {
         connect_with_state(&self.state, &self.rt, auth, jumps, host, port, user)
     }
 
-    /// Reveal конкретной версии UTF-8-секрета из истории, type-gated к
-    /// `expected_type` (чужой тип — в т.ч. ключ — через этот путь не читается).
+    /// Reveal of a specific version of a UTF-8 secret from history, type-gated to
+    /// `expected_type` (another type — including a key — is not read through this path).
     fn read_item_version(
         &self,
         vault_id: &str,
@@ -4641,10 +4641,10 @@ impl Core {
         Ok(s.to_string())
     }
 
-    /// Разворачивает группу (рекурсивно, дедуп + защита от циклов/глубины) в
-    /// `(цели для exec, полный план)`. Цели — только профили, готовые к коннекту
-    /// (не `PromptPassword`); план включает каждый член с его статусом. Чистое
-    /// чтение волта: ни коннекта, ни загрузки ключей, ни расшифровки паролей.
+    /// Expands a group (recursively, dedup + protection against cycles/depth) into
+    /// `(targets for exec, the full plan)`. Targets are only profiles ready to connect
+    /// (not `PromptPassword`); the plan includes each member with its status. A pure
+    /// read of the vault: no connect, no loading of keys, no decryption of passwords.
     fn resolve_group(
         &self,
         vault_id: &str,
@@ -4675,7 +4675,7 @@ impl Core {
                 .get(&pid)
                 .expect("flattened member is a profile");
             match &p.auth {
-                // Нет заранее известного пароля → в пакет не идёт (интерактив).
+                // No password known in advance → it doesn't go into the batch (interactive).
                 ProfileAuth::PromptPassword => {
                     plans.push(GroupTargetPlan {
                         member_id: pid,
@@ -4685,10 +4685,10 @@ impl Core {
                         status: ResolveStatus::PromptPassword,
                     });
                 }
-                // Personal: резолвим личную идентичность per-host (привязка +
-                // анти-редирект). Привязан → в пакет с разрешёнными user+auth;
-                // без привязки/при редиректе → исключаем (подключить
-                // индивидуально — там будет точная ошибка), НЕ шлём пустой пароль.
+                // Personal: we resolve the personal identity per-host (binding +
+                // anti-redirect). Bound → into the batch with the resolved user+auth;
+                // unbound/on redirect → excluded (connect
+                // individually — there the exact error will surface), we do NOT send an empty password.
                 ProfileAuth::Personal => {
                     let dest = self.personal_destination(
                         p.host.clone(),
@@ -4756,17 +4756,17 @@ impl Core {
     }
 }
 
-/// Коннект+аутентификация против разделяемого распакованного состояния (под его
-/// локом). Используется и [`Core::connect_session`], и [`ReconnectingSession`] —
-/// последняя переразрешает креды из волта на каждый реконнект (plaintext не
-/// кэшируется между попытками).
+/// Connect + authentication against the shared unwrapped state (under its
+/// lock). Used by both [`Core::connect_session`] and [`ReconnectingSession`] —
+/// the latter re-resolves credentials from the vault on every reconnect (plaintext is not
+/// cached between attempts).
 ///
-/// Замечание о параллелизме: лок состояния держится на всё время `block_on`
-/// SSH-хендшейка (до `HANDSHAKE_TIMEOUT`=30с), т.е. коннекты сериализуются. Это
-/// присуще модели: `storage` (rusqlite `Connection`) и встроенный агент — `!Sync`
-/// и живут под этим локом, а проверка host key в TOFU дёргает `storage` прямо во
-/// время хендшейка. Для однопользовательского клиента коннекты и так
-/// последовательны; вынос сети из-под лока потребовал бы Sync-хранилища.
+/// A note on parallelism: the state lock is held for the entire `block_on`
+/// of the SSH handshake (up to `HANDSHAKE_TIMEOUT`=30s), i.e. connects are serialized. This
+/// is inherent to the model: `storage` (rusqlite `Connection`) and the embedded agent are `!Sync`
+/// and live under this lock, and the TOFU host-key check touches `storage` right during
+/// the handshake. For a single-user client connects are sequential anyway,
+/// so moving the network out from under the lock would require Sync storage.
 #[allow(clippy::too_many_arguments)]
 fn connect_with_state(
     state: &Arc<Mutex<Option<CoreState>>>,
@@ -4781,8 +4781,8 @@ fn connect_with_state(
     let st = guard.as_mut().ok_or(FfiError::Locked)?;
     let mut chain = Vec::with_capacity(jumps.len());
     for j in jumps {
-        // Host-chain (B2.2): ref-хоп резолвится из другого профиля-бастиона (host/
-        // port/user/auth берутся оттуда); обычный хоп — inline, как раньше.
+        // Host-chain (B2.2): a ref hop is resolved from another bastion profile (host/
+        // port/user/auth are taken from there); a normal hop is inline, as before.
         let (host, port, user, auth) = match &j.hop_ref {
             Some(hr) => {
                 let prof = resolve_profile_by_uid(st, &hr.vault_id, &hr.profile_uid)?;
@@ -4819,14 +4819,14 @@ fn connect_with_state(
     .map_err(map_transport_err)
 }
 
-/// Линейный backoff: задержка перед попыткой `attempt` (0-based) = `base_ms *
+/// Linear backoff: the delay before attempt `attempt` (0-based) = `base_ms *
 /// (attempt+1)`.
 fn retry_backoff_ms(attempt: u32, base_ms: u32) -> u64 {
     base_ms as u64 * (attempt as u64 + 1)
 }
 
-/// Переводит FFI-способ аутентификации в транспортный: ключ грузится в агент,
-/// пароль из волта расшифровывается в `Zeroizing` (plaintext не покидает ядро).
+/// Translates the FFI authentication method into a transport one: the key is loaded into the agent,
+/// a vault password is decrypted into `Zeroizing` (the plaintext never leaves the core).
 fn resolve_auth(state: &mut CoreState, auth: &AuthMethod) -> Result<Auth, FfiError> {
     Ok(match auth {
         AuthMethod::Agent {
@@ -4850,9 +4850,9 @@ fn resolve_auth(state: &mut CoreState, auth: &AuthMethod) -> Result<Auth, FfiErr
     })
 }
 
-/// Читает item типа «пароль» из волта. Только для внутреннего использования при
-/// коннекте и для явного reveal ([`Core::get_password`]); чужой тип item (в т.ч.
-/// SSH-ключ) через этот путь не читается.
+/// Reads an item of type "password" from the vault. For internal use only during a
+/// connect and for an explicit reveal ([`Core::get_password`]); an item of another type (including
+/// an SSH key) is not read through this path.
 fn read_password_item(
     state: &CoreState,
     vault_id: &str,
@@ -4861,9 +4861,9 @@ fn read_password_item(
     read_utf8_item(state, vault_id, item_id, ITEM_TYPE_PASSWORD, "a password")
 }
 
-/// Читает UTF-8-контент item заданного типа (пароль/заметка). Type-gate: item
-/// другого типа (в т.ч. приватный ключ) через этот путь не читается — инвариант
-/// «plaintext-ключи не пересекают FFI» сохраняется. Контент в `Zeroizing`.
+/// Reads the UTF-8 content of an item of a given type (password/note). Type-gate: an item
+/// of another type (including a private key) is not read through this path — the invariant
+/// "plaintext keys never cross the FFI" is preserved. The content is in `Zeroizing`.
 fn read_utf8_item(
     state: &CoreState,
     vault_id: &str,
@@ -4889,9 +4889,9 @@ fn read_utf8_item(
     Ok(Zeroizing::new(s.to_string()))
 }
 
-/// Раскладка одного файла на один хост: открыть SFTP, опц. создать родительский
-/// каталог (ошибку «существует» глотаем), записать. Ошибки в `String` (для
-/// единообразия с веткой таймаута в [`Core::sftp_put_multi`]).
+/// Laying out a single file onto one host: open SFTP, optionally create the parent
+/// directory (the "exists" error is swallowed), write. Errors are `String`s (for
+/// consistency with the timeout branch in [`Core::sftp_put_multi`]).
 async fn sftp_put_one(
     client: &SshClient,
     remote_path: &str,
@@ -4909,7 +4909,7 @@ async fn sftp_put_one(
         .map_err(|e| e.to_string())
 }
 
-/// Родительский каталог пути (один уровень). `None`, если родителя нет.
+/// The parent directory of a path (one level). `None` if there is no parent.
 fn parent_dir(path: &str) -> Option<String> {
     let p = path.trim_end_matches('/');
     p.rfind('/').map(|i| {
@@ -4921,9 +4921,9 @@ fn parent_dir(path: &str) -> Option<String> {
     })
 }
 
-/// Совпадение тегов хоста с запросом. `match_all` → запрос ⊆ тегов хоста (AND);
-/// иначе пересечение непусто (OR). Пустой запрос → не выбираем ничего (защита от
-/// случайного «exec на все хосты»).
+/// Matching a host's tags against a query. `match_all` → query ⊆ the host's tags (AND);
+/// otherwise the intersection is non-empty (OR). An empty query → we select nothing (protection against
+/// an accidental "exec on all hosts").
 fn tags_match(host_tags: &[String], query: &[String], match_all: bool) -> bool {
     if query.is_empty() {
         return false;
@@ -4935,10 +4935,10 @@ fn tags_match(host_tags: &[String], query: &[String], match_all: bool) -> bool {
     }
 }
 
-/// Рекурсивное раскрытие вложенных групп в плоский упорядоченный список профилей.
-/// Член — id профиля (в `profiles`) или id вложенной группы (ключ `groups`).
-/// `visited_groups` рвёт циклы, `seen_profiles` дедуплицирует, `max_depth`
-/// ограничивает глубину. Возвращает (профили по порядку обхода, проблемы).
+/// Recursive expansion of nested groups into a flat ordered list of profiles.
+/// A member is a profile id (in `profiles`) or a nested-group id (a key in `groups`).
+/// `visited_groups` breaks cycles, `seen_profiles` deduplicates, `max_depth`
+/// limits the depth. Returns (profiles in traversal order, problems).
 fn flatten_group_members(
     groups: &std::collections::HashMap<String, Vec<String>>,
     profiles: &std::collections::HashSet<String>,
@@ -4966,7 +4966,7 @@ fn flatten_group_members(
             };
             for m in members.clone() {
                 if self.groups.contains_key(&m) {
-                    // Вложенная группа: впервые — спускаемся; повторно — цикл.
+                    // A nested group: first time — descend; again — a cycle.
                     if self.visited_groups.insert(m.clone()) {
                         self.walk(&m, depth + 1);
                     } else {
@@ -4995,9 +4995,9 @@ fn flatten_group_members(
     (f.result, f.issues)
 }
 
-/// Профиль → цель multi-exec в том же волте. `PromptPassword` не имеет хранимого
-/// секрета → пустой `Password` (помечается отдельно в резолве групп/тегов; в
-/// прогоне без интерактива даст ошибку аутентификации, а не молчаливый успех).
+/// Profile → a multi-exec target in the same vault. `PromptPassword` has no stored
+/// secret → an empty `Password` (marked separately in group/tag resolution; in
+/// a non-interactive run it yields an authentication error, not a silent success).
 fn profile_to_target(vault_id: &str, p: ConnectionProfile) -> MultiExecTarget {
     MultiExecTarget {
         host: p.host,
@@ -5008,10 +5008,10 @@ fn profile_to_target(vault_id: &str, p: ConnectionProfile) -> MultiExecTarget {
     }
 }
 
-/// Ссылку профиля на креды (`ProfileAuth`, vault-относительную) переводит в
-/// vault-квалифицированный [`AuthMethod`], проставляя `vault_id` того волта, где
-/// живёт профиль. `PromptPassword` → пустой inline-`Password` (в неинтерактивном
-/// прогоне даст ошибку аутентификации, а не молчаливый успех).
+/// Translates a profile's credential reference (`ProfileAuth`, vault-relative) into a
+/// vault-qualified [`AuthMethod`], setting the `vault_id` of the vault where
+/// the profile lives. `PromptPassword` → an empty inline `Password` (in a non-interactive
+/// run it yields an authentication error, not a silent success).
 fn profile_auth_to_method(vault_id: &str, auth: ProfileAuth) -> AuthMethod {
     match auth {
         ProfileAuth::Key { key_item_id } => AuthMethod::Agent {
@@ -5025,19 +5025,19 @@ fn profile_auth_to_method(vault_id: &str, auth: ProfileAuth) -> AuthMethod {
         ProfileAuth::PromptPassword => AuthMethod::Password {
             password: String::new(),
         },
-        // Personal сюда в норме НЕ доходит: fan-out-пути (resolve_group,
-        // select_targets_by_tags) исключают его до profile_to_target, а
-        // индивидуальный коннект идёт через resolve_personal_auth (с проверкой
-        // анти-редиректа). Оставляем защитный fail-safe (пустой Password даст
-        // ошибку аутентификации на обычном сервере), а не молчаливый успех.
-        // Корректный резолв Personal в fan-out — B6.
+        // Personal normally does NOT reach here: the fan-out paths (resolve_group,
+        // select_targets_by_tags) exclude it before profile_to_target, and
+        // an individual connect goes through resolve_personal_auth (with an
+        // anti-redirect check). We keep a defensive fail-safe (an empty Password yields
+        // an authentication error on a normal server), not a silent success.
+        // Correct resolution of Personal in fan-out is B6.
         ProfileAuth::Personal => AuthMethod::Password {
             password: String::new(),
         },
     }
 }
 
-/// Маппинг ошибок транспорта: рассинхрон host key выделяем отдельно для UI.
+/// Mapping of transport errors: a host-key mismatch is singled out for the UI.
 fn map_transport_err(e: unissh_ssh_transport::TransportError) -> FfiError {
     match e {
         unissh_ssh_transport::TransportError::HostKeyMismatch {
@@ -5053,10 +5053,10 @@ fn map_transport_err(e: unissh_ssh_transport::TransportError) -> FfiError {
     }
 }
 
-/// Защита от кросс-типового затирания: если по `item_id` уже есть **живой** item
-/// другого типа, отказываем (иначе, напр., профиль соединения с id существующего
-/// ключа молча уничтожил бы ключ). Проверка по сырой записи storage — без
-/// расшифровки/проверки подписи.
+/// Protection against cross-type overwriting: if there is already a **live** item at `item_id`
+/// of another type, we refuse (otherwise, e.g., a connection profile with the id of an existing
+/// key would silently destroy the key). The check is against the raw storage record — without
+/// decryption/signature verification.
 fn ensure_item_type(
     storage: &Storage,
     vault_id: &str,
@@ -5072,7 +5072,7 @@ fn ensure_item_type(
     Ok(())
 }
 
-/// Маппинг ошибок vault: not-found/already-exists выделяем для UI.
+/// Mapping of vault errors: not-found/already-exists are singled out for the UI.
 fn map_vault_err(e: unissh_vault::VaultError) -> FfiError {
     match e {
         unissh_vault::VaultError::NotFound => FfiError::NotFound,
@@ -5081,9 +5081,9 @@ fn map_vault_err(e: unissh_vault::VaultError) -> FfiError {
     }
 }
 
-/// Расшифрованное содержимое per-account состояния (A3.2): указатель на личный
-/// волт + account-default username. Кодировка: `put(vault_id) || put(username_utf8)`
-/// (u32-BE длины). Пустой vault_id/username = «не задано».
+/// The decrypted contents of the per-account state (A3.2): the pointer to the personal
+/// vault + the account-default username. Encoding: `put(vault_id) || put(username_utf8)`
+/// (u32-BE lengths). An empty vault_id/username = "not set".
 #[derive(Default)]
 struct AccountStatePayload {
     personal_vault_id: Vec<u8>,
@@ -5127,7 +5127,7 @@ impl AccountStatePayload {
     }
 }
 
-/// Маппинг ошибок keychain: невалидные креды/откат поколения — отдельно для UI.
+/// Mapping of keychain errors: invalid credentials/generation rollback — singled out for the UI.
 fn map_keychain_err(e: unissh_keychain::KeychainError) -> FfiError {
     use unissh_keychain::KeychainError as K;
     match e {
@@ -5136,23 +5136,23 @@ fn map_keychain_err(e: unissh_keychain::KeychainError) -> FfiError {
     }
 }
 
-/// Маппинг ошибок sync: фатальные → Other с сообщением (детали — в отчёте, не тут).
+/// Mapping of sync errors: fatal ones → Other with a message (details are in the report, not here).
 fn map_sync_err(e: unissh_sync::SyncError) -> FfiError {
     FfiError::Other { msg: e.to_string() }
 }
 
-/// Декодирует hex-`vault_id` (cloud UUIDv4) в сырые байты. Битый hex → Other.
+/// Decodes a hex `vault_id` (a cloud UUIDv4) into raw bytes. Broken hex → Other.
 fn decode_vid(vault_id_hex: &str) -> Result<Vec<u8>, FfiError> {
     hex::decode(vault_id_hex.trim()).map_err(|_| FfiError::other("invalid hex vault_id"))
 }
 
-/// Резолвит идентификатор волта в **сырые байты** для item-операций. Local-волт
-/// адресуется произвольной UTF-8-строкой (используется как есть); cloud-волт —
-/// hex'ом UUIDv4 (`create_cloud_vault`/`list_vaults` отдают hex, а хранится он под
-/// сырыми 16 байтами). Если строка декодируется как 16-байтный hex И такой волт
-/// существует — это cloud-id, берём декодированные байты; иначе — local, берём
-/// байты строки. Коллизия (local-id, совпадающий с hex существующего cloud-UUID)
-/// практически невозможна (это был бы UUID, заданный пользователем как имя id).
+/// Resolves a vault identifier into **raw bytes** for item operations. A local vault
+/// is addressed by an arbitrary UTF-8 string (used as-is); a cloud vault —
+/// by the hex of a UUIDv4 (`create_cloud_vault`/`list_vaults` return hex, but it is stored under
+/// raw 16 bytes). If the string decodes as 16-byte hex AND such a vault
+/// exists — it is a cloud id, we take the decoded bytes; otherwise — local, we take
+/// the string's bytes. A collision (a local id matching the hex of an existing cloud UUID)
+/// is practically impossible (it would be a UUID set by the user as an id name).
 fn resolve_vid(storage: &Storage, vault_id: &str) -> Vec<u8> {
     if let Ok(raw) = hex::decode(vault_id.trim()) {
         if raw.len() == 16 && matches!(storage.get_vault(&raw), Ok(Some(_))) {
@@ -5162,7 +5162,7 @@ fn resolve_vid(storage: &Storage, vault_id: &str) -> Vec<u8> {
     vault_id.as_bytes().to_vec()
 }
 
-/// Декодирует hex-pubkey фиксированной длины (32 байта Ed25519/X25519). Иначе Other.
+/// Decodes a fixed-length hex pubkey (32 bytes, Ed25519/X25519). Otherwise Other.
 fn decode_pubkey32(label: &str, hex_str: &str) -> Result<Vec<u8>, FfiError> {
     let b =
         hex::decode(hex_str.trim()).map_err(|_| FfiError::other(format!("invalid hex {label}")))?;
@@ -5172,8 +5172,8 @@ fn decode_pubkey32(label: &str, hex_str: &str) -> Result<Vec<u8>, FfiError> {
     Ok(b)
 }
 
-/// Возвращает персистентный account-id инстанса, генерируя и сохраняя его при
-/// первом обращении (идемпотентно; server-tz §2.1). Открытый id, не секрет.
+/// Returns the instance's persistent account-id, generating and saving it on
+/// first access (idempotent; server-tz §2.1). A public id, not a secret.
 fn ensure_account_id(storage: &Storage) -> Result<[u8; 16], FfiError> {
     match load_account_id(storage).map_err(map_keychain_err)? {
         Some(id) => Ok(id),
@@ -5185,8 +5185,8 @@ fn ensure_account_id(storage: &Storage) -> Result<[u8; 16], FfiError> {
     }
 }
 
-/// Общий конвертер отчёта целостности `vault` → FFI-Record (для local- и
-/// cloud/member-путей: `verify_vault_integrity` и `verify_chain`).
+/// Shared converter of a `vault` integrity report → an FFI Record (for the local and
+/// cloud/member paths: `verify_vault_integrity` and `verify_chain`).
 fn integrity_report_to_ffi(report: unissh_vault::IntegrityReport) -> VaultIntegrityReport {
     VaultIntegrityReport {
         ok: report.ok,
@@ -5206,7 +5206,7 @@ fn integrity_report_to_ffi(report: unissh_vault::IntegrityReport) -> VaultIntegr
                         IntegrityFailureKind::AuthorMismatch
                     }
                     unissh_vault::IntegrityFailure::Malformed => IntegrityFailureKind::Malformed,
-                    // non_exhaustive: будущая причина → консервативно Malformed.
+                    // non_exhaustive: a future reason → conservatively Malformed.
                     _ => IntegrityFailureKind::Malformed,
                 },
             })
@@ -5214,9 +5214,9 @@ fn integrity_report_to_ffi(report: unissh_vault::IntegrityReport) -> VaultIntegr
     }
 }
 
-/// Открывает файл keyset с правами `0600` (на unix): приватный сайдкар не должен
-/// быть доступен другим локальным пользователям — даже зашифрованный, это снижает
-/// риск офлайн-перебора Argon2. `exclusive` → `create_new` (O_EXCL).
+/// Opens the keyset file with `0600` permissions (on unix): the private sidecar must not
+/// be accessible to other local users — even encrypted, this reduces
+/// the risk of offline Argon2 brute-forcing. `exclusive` → `create_new` (O_EXCL).
 fn open_keyset_file(path: &std::path::Path, exclusive: bool) -> std::io::Result<std::fs::File> {
     let mut o = std::fs::OpenOptions::new();
     o.write(true);
@@ -5233,10 +5233,10 @@ fn open_keyset_file(path: &std::path::Path, exclusive: bool) -> std::io::Result<
     o.open(path)
 }
 
-/// Атомарно перезаписывает сайдкар keyset: пишем во временный файл и
-/// переименовываем поверх (на одной ФС rename атомарен; при сбое до rename
-/// оригинал цел). Имя temp уникально (pid), чтобы параллельные/осиротевшие temp
-/// не сталкивались; после rename — fsync каталога для durability.
+/// Atomically overwrites the keyset sidecar: we write to a temporary file and
+/// rename it over (on one filesystem rename is atomic; on a failure before the rename
+/// the original is intact). The temp name is unique (pid) so that concurrent/orphaned temps
+/// don't collide; after the rename — an fsync of the directory for durability.
 fn write_keyset_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), FfiError> {
     use std::io::Write;
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
@@ -5249,7 +5249,7 @@ fn write_keyset_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), FfiEr
         let _ = std::fs::remove_file(&tmp);
         return Err(FfiError::other(e));
     }
-    // fsync каталога — чтобы запись о переименовании дошла до диска.
+    // fsync the directory — so the rename record reaches the disk.
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if let Ok(d) = std::fs::File::open(dir) {
             let _ = d.sync_all();
@@ -5258,15 +5258,15 @@ fn write_keyset_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), FfiEr
     Ok(())
 }
 
-/// Бэкапит keyset-сайдкар в `<path>.pre-migration.bak` ПЕРЕД миграционной
-/// перезаписью — делает единственную пишущую операцию миграции (re-wrap на v3)
-/// полностью обратимой. Best-effort: при сбое — `warn` и продолжаем (миграция и
-/// так brick-safe — новая v3-запись самосогласована, старый блоб не теряется до
-/// атомарного rename). Логируется ТОЛЬКО путь (метаданные ФС), НЕ содержимое
-/// keyset (сам блоб зашифрован, но в логи крипто-блобы не пишем — см. SECURITY.md).
+/// Backs up the keyset sidecar to `<path>.pre-migration.bak` BEFORE a migration
+/// overwrite — makes the migration's single write operation (re-wrap to v3)
+/// fully reversible. Best-effort: on failure — `warn` and continue (the migration is
+/// brick-safe anyway — the new v3 record is self-consistent, the old blob is not lost until
+/// the atomic rename). ONLY the path is logged (filesystem metadata), NOT the contents
+/// of the keyset (the blob itself is encrypted, but we don't write crypto blobs to logs — see SECURITY.md).
 fn backup_keyset_sidecar(path: &std::path::Path) {
     if !path.exists() {
-        return; // нечего бэкапить (первый онбординг — сайдкара ещё нет)
+        return; // nothing to back up (first onboarding — no sidecar yet)
     }
     let mut bak = path.as_os_str().to_owned();
     bak.push(".pre-migration.bak");
@@ -5283,19 +5283,19 @@ fn backup_keyset_sidecar(path: &std::path::Path) {
     }
 }
 
-/// Inline-пароль в jump-хосте профиля → ошибка: секрет не должен попадать в
-/// JSON профиля (для хранимого пароля есть ссылка `VaultPassword`).
+/// An inline password in a profile's jump host → an error: the secret must not end up in
+/// the profile's JSON (for a stored password there is the `VaultPassword` reference).
 ///
-/// `vault_id` метода здесь отбрасывается: хранимый jump vault-относителен (item
-/// живёт в волте профиля, тот же `vault_id` восстанавливается при чтении в
-/// [`stored_to_profile`]). Кросс-волтовые хопы — отдельная модель (`HopRef`).
+/// The method's `vault_id` is dropped here: a stored jump is vault-relative (the item
+/// lives in the profile's vault, the same `vault_id` is restored on read in
+/// [`stored_to_profile`]). Cross-vault hops are a separate model (`HopRef`).
 fn jump_to_stored(j: JumpHost) -> Result<StoredJump, FfiError> {
     let hop_ref = j.hop_ref.map(|hr| StoredHopRef {
         vault_id: hr.vault_id,
         profile_uid: hr.profile_uid,
     });
-    // Ref-хоп: inline-auth игнорируется, ничего не сохраняем из неё (сам auth —
-    // placeholder). Обычный хоп: как раньше (только ссылки, inline-пароль нельзя).
+    // Ref hop: inline auth is ignored, we save nothing from it (the auth itself is a
+    // placeholder). A normal hop: as before (references only, no inline password).
     let (key_item_id, password_item_id) = if hop_ref.is_some() {
         (None, None)
     } else {
@@ -5322,8 +5322,8 @@ fn jump_to_stored(j: JumpHost) -> Result<StoredJump, FfiError> {
     })
 }
 
-/// Валидирует размер терминала на FFI-границе: оба измерения > 0, иначе мусор
-/// (например 0×0 от не инициализированного UI) уйдёт на сервер.
+/// Validates a terminal size at the FFI boundary: both dimensions > 0, otherwise garbage
+/// (e.g. 0×0 from an uninitialized UI) would go to the server.
 fn check_term_size(cols: u32, rows: u32) -> Result<(), FfiError> {
     if cols == 0 || rows == 0 {
         return Err(FfiError::other("terminal size must be non-zero"));
@@ -5340,19 +5340,19 @@ fn group_to_public(group_id: String, s: StoredGroup) -> ServerGroup {
     }
 }
 
-/// Минтит новый неизменяемый uid профиля: 16 криптослучайных байт в hex.
-/// СЛУЧАЙНЫЙ (не производный от item_id) — рециклированный после tombstone
-/// item_id (ssh-config импорт берёт alias как id) не даёт коллизию uid со старым
-/// профилем, так что чужой binding не приклеится к новому хосту.
+/// Mints a new immutable profile uid: 16 cryptographically random bytes in hex.
+/// RANDOM (not derived from item_id) — a recycled-after-tombstone
+/// item_id (the ssh-config import takes the alias as the id) won't collide in uid with an old
+/// profile, so someone else's binding won't stick to the new host.
 fn mint_profile_uid() -> String {
     hex::encode(unissh_crypto::random_bytes::<16>())
 }
 
-/// Читает сохранённые «неизвестные поля» (`extra`) существующего item того же
-/// типа, чтобы ПЕРЕНЕСТИ их в перезаписываемое тело (forward-compat: клиент не
-/// вырезает поля, добавленные будущей версией → нет молчаливого LWW-даунгрейда,
-/// напр. потери `personal`/`username_template`). Пусто, если item нет / другого
-/// типа / не распарсился.
+/// Reads the saved "unknown fields" (`extra`) of an existing item of the same
+/// type, to CARRY them into the body being overwritten (forward-compat: the client does not
+/// strip fields added by a future version → no silent LWW downgrade,
+/// e.g. no loss of `personal`/`username_template`). Empty if there is no item / of another
+/// type / it didn't parse.
 fn preserved_extra<T>(
     vault: &Vault,
     item_id: &[u8],
@@ -5372,10 +5372,10 @@ where
         .unwrap_or_default()
 }
 
-/// Детерминированный uid для легаси-профиля без сохранённого uid: sha256 от
-/// (len-prefixed vault_id ‖ item_id), первые 16 байт в hex. Стабилен между
-/// устройствами до первого пере-сохранения (тогда закрепляется в теле). Рецикл в
-/// этом окне невозможен: item_id занят живым профилем, для которого и считается.
+/// Deterministic uid for a legacy profile without a saved uid: sha256 of
+/// (len-prefixed vault_id ‖ item_id), the first 16 bytes in hex. Stable across
+/// devices until the first re-save (then it is pinned in the body). Recycling in
+/// this window is impossible: the item_id is taken by the live profile it is computed for.
 fn legacy_profile_uid(vault_id: &str, item_id: &str) -> String {
     use sha2::Digest;
     let mut h = Sha256::new();
@@ -5400,7 +5400,7 @@ fn stored_to_profile(vault_id: &str, profile_id: String, s: StoredProfile) -> Co
         user: s.user,
         tags: s.tags,
         username_template: s.username_template,
-        // Personal приоритетнее key/password-ссылок (у Personal их и нет).
+        // Personal takes priority over key/password references (Personal has none anyway).
         auth: if s.personal {
             ProfileAuth::Personal
         } else {
@@ -5417,8 +5417,8 @@ fn stored_to_profile(vault_id: &str, profile_id: String, s: StoredProfile) -> Co
                 host: j.host,
                 port: j.port,
                 user: j.user,
-                // Хопы хранимого профиля vault-относительны: их item'ы живут в том
-                // же волте, что и профиль. Проставляем этот `vault_id`.
+                // A stored profile's hops are vault-relative: their items live in the same
+                // vault as the profile. We set this `vault_id`.
                 auth: match (j.password_item_id, j.key_item_id) {
                     (Some(password_item_id), _) => AuthMethod::VaultPassword {
                         vault_id: vault_id.to_string(),
@@ -5428,9 +5428,9 @@ fn stored_to_profile(vault_id: &str, profile_id: String, s: StoredProfile) -> Co
                         vault_id: vault_id.to_string(),
                         key_item_id,
                     },
-                    // Легаси-импорт мог оставить ключ не назначенным: пустой id
-                    // сохраняет прежнюю семантику «UI назначит позже» (коннект с
-                    // ним даст NotFound).
+                    // A legacy import may have left the key unassigned: an empty id
+                    // preserves the previous semantics "the UI will assign it later" (a connect with
+                    // it will give NotFound).
                     (None, None) => AuthMethod::Agent {
                         vault_id: vault_id.to_string(),
                         key_item_id: String::new(),
@@ -5445,9 +5445,9 @@ fn stored_to_profile(vault_id: &str, profile_id: String, s: StoredProfile) -> Co
     }
 }
 
-/// Резолвит профиль-бастион по (vault_id, profile_uid) для host-chain (B2.2):
-/// сканирует connection-профили волта и находит с совпадающим неизменяемым uid.
-/// Не рекурсирует по цепочке референса (берётся только сам хоп-профиль).
+/// Resolves a bastion profile by (vault_id, profile_uid) for a host-chain (B2.2):
+/// scans the vault's connection profiles and finds the one with a matching immutable uid.
+/// Does not recurse along the reference chain (only the hop profile itself is taken).
 fn resolve_profile_by_uid(
     state: &CoreState,
     vault_id: &str,
@@ -5479,13 +5479,13 @@ fn resolve_profile_by_uid(
     Err(FfiError::NotFound)
 }
 
-/// Магия файла бэкапа волта.
+/// Magic of a vault backup file.
 const BACKUP_MAGIC: &[u8; 4] = b"UNVB";
-/// Версия формата бэкапа.
+/// Version of the backup format.
 const BACKUP_VERSION: u8 = 1;
 
-/// AAD бэкапа: связывает шифротекст с vault_id и заголовком (magic+version+
-/// kdf_blob), чтобы подмена KDF-параметров/версии детектилась при расшифровке.
+/// Backup AAD: binds the ciphertext to the vault_id and the header (magic+version+
+/// kdf_blob) so that tampering with the KDF params/version is detected on decryption.
 fn backup_aad(vault_id: &[u8], kdf_blob: &[u8]) -> AssociatedData {
     let mut tag = Vec::with_capacity(BACKUP_MAGIC.len() + 1 + kdf_blob.len());
     tag.extend_from_slice(BACKUP_MAGIC);
@@ -5494,13 +5494,13 @@ fn backup_aad(vault_id: &[u8], kdf_blob: &[u8]) -> AssociatedData {
     AssociatedData::new(vault_id.to_vec(), tag, BACKUP_VERSION as u64)
 }
 
-/// Дописывает length-prefixed (u32 BE) блоб.
+/// Appends a length-prefixed (u32 BE) blob.
 fn put_len_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(&(b.len() as u32).to_be_bytes());
     out.extend_from_slice(b);
 }
 
-/// Читатель length-prefixed framing бэкапа (с проверкой границ).
+/// Reader of the backup's length-prefixed framing (with bounds checking).
 struct ByteReader<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -5535,7 +5535,7 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-/// Разобранная PuTTY-сессия (внутреннее представление).
+/// A parsed PuTTY session (internal representation).
 #[derive(Default)]
 struct PuttySession {
     name: String,
@@ -5549,8 +5549,8 @@ struct PuttySession {
     proxy_user: String,
 }
 
-/// Разбирает экспорт PuTTY (`.reg`) в список сессий. Блок начинается со строки
-/// `[...\Sessions\<name>]` (имя url-кодировано), далее `"Key"="value"` /
+/// Parses a PuTTY export (`.reg`) into a list of sessions. A block starts with the line
+/// `[...\Sessions\<name>]` (the name is url-encoded), followed by `"Key"="value"` /
 /// `"Key"=dword:hex`.
 fn parse_putty_reg(text: &str) -> Vec<PuttySession> {
     let mut out = Vec::new();
@@ -5596,12 +5596,12 @@ fn parse_putty_reg(text: &str) -> Vec<PuttySession> {
     out
 }
 
-/// Снимает кавычки со строкового значения `.reg`.
+/// Strips the quotes from a `.reg` string value.
 fn unquote_reg(v: &str) -> String {
     v.trim().trim_matches('"').to_string()
 }
 
-/// Парсит `dword:0000XXXX` (hex) в `u32`; иначе 0.
+/// Parses `dword:0000XXXX` (hex) into `u32`; otherwise 0.
 fn parse_dword(v: &str) -> u32 {
     v.trim()
         .strip_prefix("dword:")
@@ -5609,7 +5609,7 @@ fn parse_dword(v: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Декодирует `%XX`-экранирование имени сессии PuTTY.
+/// Decodes the `%XX` escaping of a PuTTY session name.
 fn putty_unescape(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -5628,8 +5628,8 @@ fn putty_unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Рендерит jump-хост в элемент `ProxyJump` (`user@host:port`, IPv6 в скобках).
-/// Обратимо к [`parse_proxy_jump`].
+/// Renders a jump host into a `ProxyJump` element (`user@host:port`, IPv6 in brackets).
+/// Reversible with [`parse_proxy_jump`].
 fn format_proxy_hop(j: &JumpHost) -> String {
     let hostport = if j.host.contains(':') && !j.host.starts_with('[') {
         format!("[{}]:{}", j.host, j.port)
@@ -5643,9 +5643,9 @@ fn format_proxy_hop(j: &JumpHost) -> String {
     }
 }
 
-/// Разбирает `ProxyJump` (`a,b,c`, элементы вида `user@host:port`) в jump-хосты.
-/// Аутентификацию оставляем не назначенной — ключ/пароль назначит UI (импорт не
-/// знает items волта).
+/// Parses `ProxyJump` (`a,b,c`, elements of the form `user@host:port`) into jump hosts.
+/// We leave authentication unassigned — the key/password is assigned by the UI (the import does not
+/// know the vault's items).
 fn parse_proxy_jump(spec: Option<&str>) -> Vec<StoredJump> {
     let mut out = Vec::new();
     let Some(spec) = spec else {
@@ -5674,13 +5674,13 @@ fn parse_proxy_jump(spec: Option<&str>) -> Vec<StoredJump> {
     out
 }
 
-/// Разбирает `host[:port]` с поддержкой IPv6: `[2001:db8::1]:2222`, `[2001:db8::1]`,
-/// голый `2001:db8::1` (несколько `:` без скобок → весь как host), иначе
-/// `host:port`. Порт по умолчанию — 22.
+/// Parses `host[:port]` with IPv6 support: `[2001:db8::1]:2222`, `[2001:db8::1]`,
+/// a bare `2001:db8::1` (several `:` without brackets → the whole thing as host), otherwise
+/// `host:port`. The default port is 22.
 ///
-/// Скобки IPv6 всегда снимаются: тот же «голый» host-строкой уходит и в коннект
-/// (`russh`), и в lookup/pin known_hosts — идентичность хоста для пиннинга
-/// сохраняется (важно не смешивать `[ip]` и `ip` в разных путях).
+/// IPv6 brackets are always stripped: the same "bare" host string goes both into the connect
+/// (`russh`) and into the known_hosts lookup/pin — the host identity for pinning
+/// is preserved (it's important not to mix `[ip]` and `ip` across different paths).
 fn split_host_port(s: &str) -> (String, u16) {
     if let Some(rest) = s.strip_prefix('[') {
         if let Some((h, p)) = rest.split_once("]:") {
@@ -5690,7 +5690,7 @@ fn split_host_port(s: &str) -> (String, u16) {
             return (h.to_string(), 22);
         }
     }
-    // Голый IPv6-литерал (>1 двоеточия, без скобок) — порт не указан.
+    // A bare IPv6 literal (>1 colon, no brackets) — no port specified.
     if s.matches(':').count() > 1 {
         return (s.to_string(), 22);
     }
@@ -5700,12 +5700,12 @@ fn split_host_port(s: &str) -> (String, u16) {
     }
 }
 
-/// Наблюдатель интерактивной сессии (реализуется UI; UniFFI callback interface).
+/// Observer of an interactive session (implemented by the UI; a UniFFI callback interface).
 #[uniffi::export(with_foreign)]
 pub trait SessionObserver: Send + Sync {
-    /// Данные из сессии (вывод терминала).
+    /// Data from the session (terminal output).
     fn on_data(&self, data: Vec<u8>);
-    /// Сессия закрыта; код возврата (или -1).
+    /// The session is closed; the exit code (or -1).
     fn on_close(&self, exit_status: i32);
 }
 
@@ -5720,14 +5720,14 @@ impl OutputSink for ObserverSink {
     }
 }
 
-/// Наблюдатель потокового exec: stdout/stderr раздельно + код возврата.
+/// Observer of a streaming exec: stdout/stderr separately + the exit code.
 #[uniffi::export(with_foreign)]
 pub trait ExecObserver: Send + Sync {
-    /// Данные stdout.
+    /// stdout data.
     fn on_stdout(&self, data: Vec<u8>);
-    /// Данные stderr.
+    /// stderr data.
     fn on_stderr(&self, data: Vec<u8>);
-    /// Команда завершилась; код возврата (или -1).
+    /// The command finished; the exit code (or -1).
     fn on_exit(&self, exit_status: i32);
 }
 
@@ -5745,19 +5745,19 @@ impl unissh_ssh_transport::ExecSink for ExecSinkBridge {
     }
 }
 
-/// Наблюдатель broadcast-сессии: вывод каждого хоста помечается его индексом
-/// (позиция в `targets`). Реализуется UI.
+/// Observer of a broadcast session: each host's output is tagged with its index
+/// (position in `targets`). Implemented by the UI.
 #[uniffi::export(with_foreign)]
 pub trait BroadcastObserver: Send + Sync {
-    /// Данные из сессии хоста `host_index`.
+    /// Data from the session of host `host_index`.
     fn on_data(&self, host_index: u32, data: Vec<u8>);
-    /// Сессия хоста `host_index` закрыта; код возврата (или -1).
+    /// The session of host `host_index` is closed; the exit code (or -1).
     fn on_close(&self, host_index: u32, exit_status: i32);
 }
 
-/// Sink, тегирующий вывод одного хоста его индексом и делегирующий в
-/// [`BroadcastObserver`]. Навешивается per-client в ffi — крейт транспорта о
-/// broadcast не знает.
+/// A sink that tags one host's output with its index and delegates to
+/// [`BroadcastObserver`]. Attached per-client in the ffi — the transport crate knows
+/// nothing about broadcast.
 struct TaggedSink {
     observer: Arc<dyn BroadcastObserver>,
     index: u32,
@@ -5773,8 +5773,8 @@ impl OutputSink for TaggedSink {
     }
 }
 
-/// Интерактивная SSH-сессия (PTY). Управляет вводом/ресайзом/закрытием; вывод
-/// идёт в зарегистрированный observer. Не держит лок Core.
+/// An interactive SSH session (PTY). Manages input/resize/close; output
+/// goes to the registered observer. Does not hold the Core lock.
 #[derive(uniffi::Object)]
 pub struct SshSession {
     _client: Mutex<SshClient>,
@@ -5784,18 +5784,18 @@ pub struct SshSession {
 
 #[uniffi::export]
 impl SshSession {
-    /// Отправляет ввод (нажатия клавиш) в сессию.
+    /// Sends input (keystrokes) to the session.
     pub fn write(&self, data: Vec<u8>) -> Result<(), FfiError> {
         self.rt
             .block_on(self.shell.write(&data))
             .map_err(FfiError::ssh)
     }
 
-    /// Меняет размер окна терминала. `cols`/`rows` должны быть > 0.
+    /// Changes the terminal window size. `cols`/`rows` must be > 0.
     ///
-    /// Best-effort: `window-change` уходит на сервер без подтверждения, поэтому
-    /// `Ok(())` означает «нотификация отправлена», а не «сервер применил размер».
-    /// Ошибку вернёт только обрыв канала/транспорта. UI не должен ждать ack.
+    /// Best-effort: `window-change` is sent to the server without acknowledgement, so
+    /// `Ok(())` means "the notification was sent", not "the server applied the size".
+    /// An error is returned only on a channel/transport drop. The UI must not wait for an ack.
     pub fn resize(&self, cols: u32, rows: u32) -> Result<(), FfiError> {
         check_term_size(cols, rows)?;
         self.rt
@@ -5803,14 +5803,14 @@ impl SshSession {
             .map_err(FfiError::ssh)
     }
 
-    /// Закрывает сессию.
+    /// Closes the session.
     pub fn close(&self) -> Result<(), FfiError> {
         self.rt.block_on(self.shell.close()).map_err(FfiError::ssh)
     }
 }
 
-/// Хэндл потокового exec: stdin, опрос завершения, закрытие. Вывод идёт в
-/// `ExecObserver`. Не держит лок Core.
+/// Handle of a streaming exec: stdin, completion polling, close. Output goes to
+/// `ExecObserver`. Does not hold the Core lock.
 #[derive(uniffi::Object)]
 pub struct ExecHandleFfi {
     _client: Mutex<SshClient>,
@@ -5820,15 +5820,15 @@ pub struct ExecHandleFfi {
 
 #[uniffi::export]
 impl ExecHandleFfi {
-    /// Пишет в stdin команды.
+    /// Writes to the command's stdin.
     pub fn write_stdin(&self, data: Vec<u8>) -> Result<(), FfiError> {
         self.rt
             .block_on(self.handle.write_stdin(&data))
             .map_err(FfiError::ssh)
     }
 
-    /// Ждёт завершения команды до `timeout_ms` мс. `true` — завершилась (и
-    /// `on_exit` доставлен), `false` — таймаут.
+    /// Waits for the command to finish for up to `timeout_ms` ms. `true` — it finished (and
+    /// `on_exit` was delivered), `false` — a timeout.
     pub fn wait_exit(&self, timeout_ms: u32) -> Result<bool, FfiError> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
@@ -5843,18 +5843,18 @@ impl ExecHandleFfi {
         }
     }
 
-    /// Закрывает канал (EOF stdin + close).
+    /// Closes the channel (EOF stdin + close).
     pub fn close(&self) -> Result<(), FfiError> {
         self.rt.block_on(self.handle.close()).map_err(FfiError::ssh)
     }
 }
 
-/// Интерактивная PTY-сессия с авто-реконнектом. Хранит параметры подключения и
-/// при обрыве (ошибка `write`) или по явному `reconnect()` переустанавливает
-/// сессию с backoff. `Agent`/`VaultPassword`-креды переразрешаются из волта на
-/// каждой попытке (plaintext не кэшируется); inline-`Password` (если им открыли
-/// сессию) хранится в `auth` на всё время жизни сессии — для реконнекта.
-/// `HostKeyMismatch` НЕ реконнектится (возможный MITM → стоп).
+/// An interactive PTY session with auto-reconnect. Stores the connection parameters and
+/// on a drop (a `write` error) or on an explicit `reconnect()` re-establishes
+/// the session with backoff. `Agent`/`VaultPassword` credentials are re-resolved from the vault on
+/// each attempt (plaintext is not cached); an inline `Password` (if the session was opened
+/// with it) is kept in `auth` for the session's lifetime — for reconnects.
+/// `HostKeyMismatch` is NOT reconnected (a possible MITM → stop).
 #[derive(uniffi::Object)]
 pub struct ReconnectingSession {
     state: Arc<Mutex<Option<CoreState>>>,
@@ -5871,8 +5871,8 @@ pub struct ReconnectingSession {
     backoff_ms: u32,
     observer: Arc<dyn SessionObserver>,
     current: Mutex<Option<(SshClient, ShellHandle)>>,
-    // Сериализует reconnect: два одновременных reconnect() (напр. из гонки
-    // write-fail) не должны создать лишний коннект-сирота.
+    // Serializes reconnect: two concurrent reconnect() calls (e.g. from a race
+    // on write-fail) must not create an extra orphan connection.
     reconnect_lock: Mutex<()>,
 }
 
@@ -5901,7 +5901,7 @@ impl ReconnectingSession {
         for attempt in 0..=self.max_retries {
             match self.connect_once() {
                 Ok(()) => return Ok(()),
-                // MITM не лечится реконнектом — отдаём ошибку сразу.
+                // A MITM is not cured by reconnecting — we return the error immediately.
                 Err(e @ FfiError::HostKeyMismatch { .. }) => return Err(e),
                 Err(e) => {
                     last = e;
@@ -5937,7 +5937,7 @@ impl ReconnectingSession {
 
 #[uniffi::export]
 impl ReconnectingSession {
-    /// Есть ли сейчас живая сессия.
+    /// Whether there is a live session right now.
     pub fn is_connected(&self) -> bool {
         self.current
             .lock()
@@ -5945,7 +5945,7 @@ impl ReconnectingSession {
             .is_some()
     }
 
-    /// Отправляет ввод; при ошибке (обрыв) автоматически реконнектится и повторяет.
+    /// Sends input; on an error (drop) it auto-reconnects and retries.
     pub fn write(&self, data: Vec<u8>) -> Result<(), FfiError> {
         if self.try_write(&data).is_ok() {
             return Ok(());
@@ -5954,7 +5954,7 @@ impl ReconnectingSession {
         self.try_write(&data)
     }
 
-    /// Ресайз текущей сессии (`cols`/`rows` > 0).
+    /// Resizes the current session (`cols`/`rows` > 0).
     pub fn resize(&self, cols: u32, rows: u32) -> Result<(), FfiError> {
         check_term_size(cols, rows)?;
         let guard = self.current.lock().unwrap_or_else(|e| e.into_inner());
@@ -5967,9 +5967,9 @@ impl ReconnectingSession {
         }
     }
 
-    /// Явно пересоздаёт сессию (рвёт старую, подключается заново с backoff).
+    /// Explicitly recreates the session (tears down the old one, reconnects with backoff).
     pub fn reconnect(&self) -> Result<(), FfiError> {
-        // Сериализуем: параллельные reconnect() не создают коннект-сирот.
+        // We serialize: concurrent reconnect() calls don't create orphan connections.
         let _g = self
             .reconnect_lock
             .lock()
@@ -5978,7 +5978,7 @@ impl ReconnectingSession {
         self.connect_with_retry()
     }
 
-    /// Закрывает сессию и рвёт соединение.
+    /// Closes the session and tears down the connection.
     pub fn close(&self) {
         self.teardown();
     }
@@ -5990,9 +5990,9 @@ impl Drop for ReconnectingSession {
     }
 }
 
-/// Broadcast-сессия (cluster-ssh): держит PTY-сессии нескольких хостов; ввод
-/// фан-аутится во все. Не держит лок Core. Вывод — в `BroadcastObserver` с
-/// индексом хоста.
+/// A broadcast session (cluster-ssh): holds PTY sessions of several hosts; input
+/// is fanned out to all. Does not hold the Core lock. Output goes to `BroadcastObserver` with
+/// the host index.
 #[derive(uniffi::Object)]
 pub struct BroadcastSession {
     inner: Mutex<Vec<(SshClient, ShellHandle)>>,
@@ -6002,13 +6002,13 @@ pub struct BroadcastSession {
 
 #[uniffi::export]
 impl BroadcastSession {
-    /// Статусы всех целей (включая не подключившиеся).
+    /// Statuses of all targets (including those that didn't connect).
     pub fn statuses(&self) -> Vec<BroadcastHostStatus> {
         self.statuses.clone()
     }
 
-    /// Отправляет ввод во все активные сессии (best-effort: мёртвый хост не
-    /// блокирует остальные).
+    /// Sends input to all active sessions (best-effort: a dead host does not
+    /// block the others).
     pub fn write_all(&self, data: Vec<u8>) -> Result<(), FfiError> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (_client, shell) in guard.iter() {
@@ -6017,7 +6017,7 @@ impl BroadcastSession {
         Ok(())
     }
 
-    /// Ресайзит все активные сессии (`cols`/`rows` > 0). Best-effort.
+    /// Resizes all active sessions (`cols`/`rows` > 0). Best-effort.
     pub fn resize_all(&self, cols: u32, rows: u32) -> Result<(), FfiError> {
         check_term_size(cols, rows)?;
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -6027,10 +6027,10 @@ impl BroadcastSession {
         Ok(())
     }
 
-    /// Закрывает все сессии и рвёт соединения.
+    /// Closes all sessions and tears down the connections.
     pub fn close(&self) {
-        // block_on входит в контекст рантайма (Drop канала russh может
-        // tokio::spawn — без enter дроп вне рантайма паникует).
+        // block_on enters the runtime context (Drop of a russh channel may
+        // tokio::spawn — without enter a drop outside the runtime panics).
         let _enter = self.rt.enter();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (client, shell) in guard.drain(..) {
@@ -6048,9 +6048,9 @@ impl Drop for BroadcastSession {
     }
 }
 
-/// Активный туннель (проброс портов). Держит SSH-соединение живым. `close()` —
-/// чистый disconnect; при Drop без `close()` listener детерминированно
-/// останавливается (ForwardGuard) и соединение рвётся (без вежливого disconnect).
+/// An active tunnel (port forwarding). Keeps the SSH connection alive. `close()` — a
+/// clean disconnect; on Drop without `close()` the listener deterministically
+/// stops (ForwardGuard) and the connection is torn down (without a polite disconnect).
 #[derive(uniffi::Object)]
 pub struct SshTunnel {
     client: Mutex<Option<SshClient>>,
@@ -6061,18 +6061,18 @@ pub struct SshTunnel {
 
 #[uniffi::export]
 impl SshTunnel {
-    /// Адрес, на котором слушает форвард: `host:port` (local/dynamic) либо
+    /// The address the forward listens on: `host:port` (local/dynamic) or
     /// `remote_bind:assigned_port` (remote).
     pub fn bind_address(&self) -> String {
         self.bind_addr.clone()
     }
 
-    /// Закрывает туннель и соединение.
+    /// Closes the tunnel and the connection.
     pub fn close(&self) {
-        // Останавливаем listener (Drop ForwardGuard), затем штатно рвём соединение.
-        // SshClient/ForwardGuard дропаются безопасно вне рантайма; block_on сам
-        // входит в контекст рантайма (поэтому без отдельного enter — иначе вложенный
-        // block_on паникует).
+        // Stop the listener (Drop of ForwardGuard), then tear down the connection normally.
+        // SshClient/ForwardGuard drop safely outside the runtime; block_on itself
+        // enters the runtime context (so no separate enter — otherwise a nested
+        // block_on panics).
         let _ = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(c) = self.client.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = self.rt.block_on(c.disconnect());
@@ -6082,18 +6082,18 @@ impl SshTunnel {
 
 impl Drop for SshTunnel {
     fn drop(&mut self) {
-        // Детерминированно останавливаем listener (ForwardGuard.abort при Drop).
-        // SshClient (= Arc<Handle>) дропается безопасно вне рантайма; чистый
-        // disconnect делает только close() (block_on в Drop здесь не зовём).
+        // Deterministically stop the listener (ForwardGuard.abort on Drop).
+        // SshClient (= Arc<Handle>) drops safely outside the runtime; a clean
+        // disconnect is done only by close() (we don't call block_on in Drop here).
         let _ = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take();
         let _ = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 
-/// Callback прогресса SFTP-передачи (реализуется UI).
+/// Progress callback of an SFTP transfer (implemented by the UI).
 #[uniffi::export(with_foreign)]
 pub trait SftpProgressObserver: Send + Sync {
-    /// `transferred` байт из `total` (0, если размер неизвестен).
+    /// `transferred` bytes of `total` (0 if the size is unknown).
     fn on_progress(&self, transferred: u64, total: u64);
 }
 
@@ -6105,8 +6105,8 @@ impl unissh_ssh_transport::SftpProgress for ProgressBridge {
     }
 }
 
-/// Токен кооперативной отмены передачи. Создаётся UI, передаётся в
-/// `sftp_download`/`sftp_upload`, отменяется из другого потока.
+/// A cooperative cancellation token for a transfer. Created by the UI, passed to
+/// `sftp_download`/`sftp_upload`, cancelled from another thread.
 #[derive(uniffi::Object)]
 pub struct CancelToken {
     flag: Arc<std::sync::atomic::AtomicBool>,
@@ -6114,7 +6114,7 @@ pub struct CancelToken {
 
 #[uniffi::export]
 impl CancelToken {
-    /// Новый (не отменённый) токен.
+    /// A new (uncancelled) token.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -6122,12 +6122,12 @@ impl CancelToken {
         })
     }
 
-    /// Запрашивает отмену (передача остановится между чанками).
+    /// Requests cancellation (the transfer will stop between chunks).
     pub fn cancel(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Запрошена ли отмена.
+    /// Whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -6141,29 +6141,29 @@ impl unissh_ssh_transport::SftpCancel for CancelBridge {
     }
 }
 
-// === Веха-2: синк через коллбэк-интерфейс ===
+// === Milestone 2: sync via a callback interface ===
 
-/// **Коллбэк-интерфейс синка** (реализуется приложением — server-tz §3.1): узкий
-/// контракт «недоверенного ящика блобов». Ядро НЕ доверяет ни порядку, ни
-/// `server_seq`, ни содержимому — `sync_now` верифицирует каждый объект перед
-/// применением. Объекты пересекают границу как непрозрачные байты
-/// (`SyncObject::to_bytes`); ядро сериализует/десериализует на своей стороне.
+/// **Sync callback interface** (implemented by the app — server-tz §3.1): a narrow
+/// contract of an "untrusted box of blobs". The core does NOT trust the order, nor
+/// `server_seq`, nor the contents — `sync_now` verifies every object before
+/// applying it. Objects cross the boundary as opaque bytes
+/// (`SyncObject::to_bytes`); the core serializes/deserializes on its own side.
 #[uniffi::export(with_foreign)]
 pub trait FfiSyncTransport: Send + Sync {
-    /// Отдаёт объекты серверу; возвращает назначенные `server_seq` в порядке входа.
+    /// Hands objects to the server; returns the assigned `server_seq` in input order.
     fn push_objects(&self, objects: Vec<Vec<u8>>) -> Result<Vec<u64>, FfiError>;
-    /// Отдаёт всё со `server_seq > cursor` (порядок не гарантируется — ядро сортирует).
+    /// Returns everything with `server_seq > cursor` (order not guaranteed — the core sorts).
     fn delta_since(&self, cursor: u64) -> Vec<SyncDeltaItem>;
-    /// Сообщает максимальный назначенный `server_seq` (справочно, не доверенный).
+    /// Reports the maximum assigned `server_seq` (informational, not trusted).
     fn report_version(&self) -> u64;
 }
 
-/// Адаптер: foreign-`FfiSyncTransport` → `unissh_sync::SyncTransport`. Сериализует
-/// `SyncObject` в байты на границе FFI и мапит ошибки. Битый объект из дельты →
-/// пропускается (движок и так верифицирует каждый объект перед применением).
+/// Adapter: a foreign `FfiSyncTransport` → `unissh_sync::SyncTransport`. Serializes
+/// `SyncObject` to bytes at the FFI boundary and maps errors. A broken object from the delta →
+/// is skipped (the engine verifies every object before applying it anyway).
 struct ForeignTransportAdapter {
     inner: Arc<dyn FfiSyncTransport>,
-    /// Последняя ошибка push (коллбэк может бросить) — пробрасывается из sync_push.
+    /// The last push error (the callback may throw) — propagated out of sync_push.
     push_err: Mutex<Option<FfiError>>,
 }
 
@@ -6197,18 +6197,18 @@ impl SyncTransport for ForeignTransportAdapter {
     }
 }
 
-// === Веха-2: онбординг Path B (PAKE device-to-device) ===
+// === Milestone 2: onboarding Path B (PAKE device-to-device) ===
 //
-// Дизайн-замечание (uniffi 0.31): `#[uniffi::constructor]` обязан возвращать
-// `Self`/`Arc<Self>`/`Result<Arc<Self>>` — НЕ произвольный Record. Поэтому
-// конструктор сразу выполняет PAKE-шаг и кладёт исходящее сообщение (`msg1`/
-// `msg2`) ВНУТРЬ хэндла; релей-блоб отдаётся отдельным геттером `msg()`. Это
-// согласованный fallback к плановой паре «handle + bytes» без изменения семантики
-// (сообщения по-прежнему непрозрачные релей-блобы; состояние одноразовое).
+// Design note (uniffi 0.31): `#[uniffi::constructor]` must return
+// `Self`/`Arc<Self>`/`Result<Arc<Self>>` — NOT an arbitrary Record. Therefore
+// the constructor immediately performs the PAKE step and places the outgoing message (`msg1`/
+// `msg2`) INSIDE the handle; the relay blob is exposed via a separate getter `msg()`. This
+// is an agreed fallback to the planned "handle + bytes" pair without changing the semantics
+// (the messages are still opaque relay blobs; the state is one-shot).
 
-/// Хэндл initiator-стороны PAKE-онбординга (Path B). Одноразовый: `start` создаёт
-/// состояние + `msg1` (геттер `msg()`); `Core::onboard_confirm_and_seal`
-/// потребляет состояние.
+/// Handle of the initiator side of PAKE onboarding (Path B). One-shot: `start` creates
+/// the state + `msg1` (getter `msg()`); `Core::onboard_confirm_and_seal`
+/// consumes the state.
 #[derive(uniffi::Object)]
 pub struct OnboardInitiatorHandle {
     inner: Mutex<Option<OnboardInitiator>>,
@@ -6217,8 +6217,8 @@ pub struct OnboardInitiatorHandle {
 
 #[uniffi::export]
 impl OnboardInitiatorHandle {
-    /// Стартует онбординг на существующем устройстве по OOB-коду. Возвращает хэндл,
-    /// держащий состояние initiator и `msg1` (взять геттером [`Self::msg`]).
+    /// Starts onboarding on the existing device using the OOB code. Returns a handle
+    /// holding the initiator state and `msg1` (obtain it via the getter [`Self::msg`]).
     #[uniffi::constructor]
     pub fn start(code: Vec<u8>) -> Arc<Self> {
         let code = Zeroizing::new(code);
@@ -6229,15 +6229,15 @@ impl OnboardInitiatorHandle {
         })
     }
 
-    /// `msg1` — непрозрачный релей-блоб для responder'а.
+    /// `msg1` — an opaque relay blob for the responder.
     pub fn msg(&self) -> Vec<u8> {
         self.msg1.clone()
     }
 }
 
-/// Хэндл responder-стороны PAKE-онбординга (новое устройство). Одноразовый:
-/// `respond` создаёт состояние + `msg2` (геттер `msg()`); `Core::
-/// onboard_finish_install` потребляет состояние.
+/// Handle of the responder side of PAKE onboarding (the new device). One-shot:
+/// `respond` creates the state + `msg2` (getter `msg()`); `Core::
+/// onboard_finish_install` consumes the state.
 #[derive(uniffi::Object)]
 pub struct OnboardResponderHandle {
     inner: Mutex<Option<OnboardResponder>>,
@@ -6246,8 +6246,8 @@ pub struct OnboardResponderHandle {
 
 #[uniffi::export]
 impl OnboardResponderHandle {
-    /// Новое устройство принимает `msg1` по OOB-коду и формирует `msg2` (релей
-    /// назад initiator'у; взять геттером [`Self::msg`]).
+    /// The new device accepts `msg1` via the OOB code and forms `msg2` (relayed
+    /// back to the initiator; obtain it via the getter [`Self::msg`]).
     #[uniffi::constructor]
     pub fn respond(code: Vec<u8>, msg1: Vec<u8>) -> Result<Arc<Self>, FfiError> {
         let code = Zeroizing::new(code);
@@ -6258,27 +6258,27 @@ impl OnboardResponderHandle {
         }))
     }
 
-    /// `msg2` — непрозрачный релей-блоб обратно initiator'у.
+    /// `msg2` — an opaque relay blob back to the initiator.
     pub fn msg(&self) -> Vec<u8> {
         self.msg2.clone()
     }
 }
 
-/// Пул idle SFTP-каналов поверх ОДНОГО SSH-соединения. russh мультиплексирует
-/// много каналов на одном транспорте, поэтому параллельные передачи файлов не
-/// требуют новых хендшейков/аутентификаций — только новые каналы.
+/// A pool of idle SFTP channels over a SINGLE SSH connection. russh multiplexes
+/// many channels over one transport, so parallel file transfers do not
+/// require new handshakes/authentications — only new channels.
 ///
-/// Инвариант `created` = idle + арендованные (leased). Растёт лениво до `max`:
-/// первый канал открыт при коннекте, остальные — по мере спроса. `generation`
-/// растёт при полном `reconnect()`; канал старого поколения при возврате из аренды
-/// не кладётся обратно в пул, а выбрасывается (его транспорт уже мёртв). `closed`
-/// (close/Drop) заставляет аренду немедленно падать.
+/// Invariant: `created` = idle + leased. Grows lazily up to `max`:
+/// the first channel is opened at connect, the rest — on demand. `generation`
+/// grows on a full `reconnect()`; a channel of an old generation, when returned from a lease,
+/// is not put back into the pool but discarded (its transport is already dead). `closed`
+/// (close/Drop) makes a lease fail immediately.
 ///
-/// `max` — потолок числа каналов (K из настроек). Может **уменьшиться** во время
-/// работы: если сервер отклоняет открытие нового канала (напр. `MaxSessions` →
-/// `AdministrativelyProhibited`), пул ужимается до фактически разрешённого числа и
-/// переиспользует уже открытые каналы (деградация к менее параллельному/
-/// последовательному режиму) вместо провала передачи.
+/// `max` — the cap on the number of channels (K from settings). It may **decrease** during
+/// operation: if the server rejects opening a new channel (e.g. `MaxSessions` →
+/// `AdministrativelyProhibited`), the pool shrinks to the actually permitted number and
+/// reuses the already-open channels (degrading to a less parallel/
+/// sequential mode) instead of failing the transfer.
 struct SftpPool {
     idle: Vec<SftpSession>,
     created: usize,
@@ -6287,20 +6287,20 @@ struct SftpPool {
     closed: bool,
 }
 
-/// SFTP-подключение: одно SSH-соединение + пул каналов ([`SftpPool`]). Операции
-/// арендуют канал из пула, поэтому до `SftpPool::max` из них идут параллельно
-/// (главный рычаг для сценария «много файлов»); при `max == 1` поведение
-/// эквивалентно прежней строго последовательной сессии.
+/// An SFTP connection: a single SSH connection + a channel pool ([`SftpPool`]). Operations
+/// lease a channel from the pool, so up to `SftpPool::max` of them run in parallel
+/// (the main lever for the "many files" scenario); with `max == 1` the behavior
+/// is equivalent to the previous strictly sequential session.
 ///
-/// Каналы закрываются под `rt.enter()` (в `close`/Drop/при выбросе): внутренний
-/// поток канала russh при Drop делает `tokio::spawn`, которому нужен контекст
-/// рантайма — иначе паника при дропе вне рантайма.
+/// Channels are closed under `rt.enter()` (in `close`/Drop/on discard): the internal
+/// russh channel thread does a `tokio::spawn` on Drop, which needs a runtime
+/// context — otherwise a panic on a drop outside the runtime.
 #[derive(uniffi::Object)]
 pub struct SftpFfi {
     client: Mutex<Option<SshClient>>,
-    /// Пул каналов + условная переменная для блокирующей аренды: аренда вызывается
-    /// с blocking-потоков Tauri (`spawn_blocking`), поэтому ждём через `Condvar`,
-    /// а не через async-семафор.
+    /// A channel pool + a condition variable for a blocking lease: the lease is called
+    /// from Tauri's blocking threads (`spawn_blocking`), so we wait via a `Condvar`,
+    /// not via an async semaphore.
     pool: Mutex<SftpPool>,
     pool_cv: Condvar,
     rt: Arc<tokio::runtime::Runtime>,
@@ -6327,42 +6327,42 @@ pub struct SftpFfi {
 /// while holding the session locks.
 const REOPEN_CHANNEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Сколько раз повторить открытие канала, когда в пуле НЕ осталось ни одного
-/// живого канала для отката, а сервер отказал в новом. Отказ обычно переходный:
-/// слот сессии только что закрытого (выброшенного) канала ещё не освобождён на
-/// сервере (`MaxSessions` → `AdministrativelyProhibited`). Ретраи с backoff
-/// переживают это; реально мёртвое соединение исчерпает их и ошибка всплывёт.
+/// How many times to retry opening a channel when NOT a single
+/// live channel is left in the pool to fall back to, and the server refused a new one. The refusal is usually transient:
+/// the session slot of the just-closed (discarded) channel is not yet freed on the
+/// server (`MaxSessions` → `AdministrativelyProhibited`). Retries with backoff
+/// survive this; a truly dead connection exhausts them and the error surfaces.
 const OPEN_RETRY_MAX: u32 = 6;
-/// Линейный шаг backoff между ретраями открытия (attempt * шаг). Итого при
-/// OPEN_RETRY_MAX=6 ожидание ~0.15+0.3+…+0.9 ≈ 3.1 c до отказа.
+/// Linear backoff step between open retries (attempt * step). In total, with
+/// OPEN_RETRY_MAX=6 the wait is ~0.15+0.3+…+0.9 ≈ 3.1 s before giving up.
 const OPEN_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl SftpFfi {
-    /// Арендует канал из пула, выполняет `f`, возвращает канал. До `SftpPool::max`
-    /// операций идут параллельно; при насыщении блокирует вызывающий blocking-поток
-    /// до освобождения канала. Канал возвращается в пул, если его поток не
-    /// десинхронизирован (`!is_poisoned`) и поколение актуально — в т.ч. после
-    /// ЧИСТОЙ файловой ошибки. Испорченный (обрыв/таймаут/прерванный конвейер)
-    /// выбрасывается; пул само-лечится, открыв свежий при следующей аренде.
+    /// Leases a channel from the pool, runs `f`, returns the channel. Up to `SftpPool::max`
+    /// operations run in parallel; when saturated it blocks the calling blocking thread
+    /// until a channel is freed. The channel is returned to the pool if its thread is not
+    /// desynchronized (`!is_poisoned`) and its generation is current — including after
+    /// a CLEAN file error. A spoiled one (drop/timeout/interrupted pipeline)
+    /// is discarded; the pool self-heals by opening a fresh one on the next lease.
     fn with_sftp<T, F>(&self, f: F) -> Result<T, FfiError>
     where
         F: FnOnce(&Arc<tokio::runtime::Runtime>, &mut SftpSession) -> Result<T, FfiError>,
     {
         let (mut ch, gen) = self.lease()?;
         let r = f(&self.rt, &mut ch);
-        // Возвращаем канал в пул, пока его поток НЕ десинхронизирован — даже при
-        // ошибке операции. Чистая файловая ошибка (нет прав/файла, каталог уже
-        // существует) не портит канал, и выбрасывать его незачем: именно
-        // выбрасывание годных каналов (с переоткрытием) создавало channel-churn,
-        // упиравшийся в серверный `MaxSessions`. Испорченный (обрыв/таймаут/
-        // прерванный конвейер) канал выбрасываем — переиспользовать его нельзя.
+        // Return the channel to the pool while its thread is NOT desynchronized — even on
+        // an operation error. A clean file error (no permission/file, directory already
+        // exists) does not spoil the channel, and there's no reason to discard it: it was precisely
+        // discarding good channels (with reopening) that created channel churn
+        // hitting the server's `MaxSessions`. A spoiled one (drop/timeout/
+        // interrupted pipeline) channel is discarded — it cannot be reused.
         let healthy = !ch.is_poisoned();
         self.giveback(ch, gen, healthy);
         r
     }
 
-    /// Блокирующая аренда канала. Возвращает канал и его поколение (для проверки
-    /// актуальности при возврате).
+    /// Blocking channel lease. Returns the channel and its generation (to check
+    /// currency on return).
     fn lease(&self) -> Result<(SftpSession, u64), FfiError> {
         let mut open_retries: u32 = 0;
         let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
@@ -6374,9 +6374,9 @@ impl SftpFfi {
                 return Ok((ch, p.generation));
             }
             if p.created < p.max {
-                // Резервируем слот и открываем канал ВНЕ лока пула: открытие делает
-                // block_on и лочит client — держать при этом лок пула нельзя (иначе
-                // сериализовали бы все аренды на время открытия).
+                // We reserve a slot and open the channel OUTSIDE the pool lock: opening does a
+                // block_on and locks the client — we must not hold the pool lock at the same time (otherwise
+                // we'd serialize all leases for the duration of the open).
                 p.created += 1;
                 let gen = p.generation;
                 drop(p);
@@ -6386,23 +6386,23 @@ impl SftpFfi {
                         p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
                         p.created -= 1;
                         if p.created > 0 {
-                            // Есть живой канал для отката. Сервер отказал в НОВОМ
-                            // (типично `MaxSessions` → `AdministrativelyProhibited`):
-                            // ужимаем потолок до разрешённого и переиспользуем
-                            // существующие — деградация, а не провал передачи. НЕ ждём
-                            // здесь напрямую: пока канал открывался (лок был отпущен),
-                            // другой поток мог вернуть свой и его notify ушёл вхолостую
-                            // — возвращаемся в начало цикла, где idle.pop() под тем же
-                            // локом либо заберёт канал, либо уйдёт в wait без гонки.
+                            // There is a live channel to fall back to. The server refused a NEW one
+                            // (typically `MaxSessions` → `AdministrativelyProhibited`):
+                            // we shrink the cap to the permitted value and reuse
+                            // the existing ones — degradation, not a transfer failure. We do NOT wait
+                            // here directly: while the channel was being opened (the lock was released),
+                            // another thread may have returned its own and its notify went to waste
+                            // — we go back to the start of the loop, where idle.pop() under the same
+                            // lock either takes a channel or goes into wait without a race.
                             if p.max > p.created {
                                 p.max = p.created;
                             }
                             continue;
                         }
-                        // Ни одного живого канала для отката. Обычно отказ переходный:
-                        // слот только что выброшенного канала ещё не освобождён на
-                        // сервере. Повторяем открытие с backoff; исчерпав ретраи (реально
-                        // мёртвое соединение) — отдаём ошибку.
+                        // Not a single live channel to fall back to. Usually the refusal is transient:
+                        // the slot of the just-discarded channel is not yet freed on the
+                        // server. We retry opening with backoff; having exhausted the retries (a truly
+                        // dead connection) — we return the error.
                         open_retries += 1;
                         if open_retries > OPEN_RETRY_MAX {
                             drop(p);
@@ -6415,15 +6415,15 @@ impl SftpFfi {
                     }
                 }
             } else {
-                // Все каналы созданы и заняты — ждём, пока кто-то вернёт свой.
+                // All channels are created and busy — we wait until someone returns theirs.
                 p = self.pool_cv.wait(p).unwrap_or_else(|e| e.into_inner());
             }
         }
     }
 
-    /// Возвращает канал в пул (успех) либо выбрасывает его (ошибка / закрытие /
-    /// устаревшее поколение), уменьшая `created`. В обоих случаях будит одного
-    /// ожидающего аренды.
+    /// Returns the channel to the pool (success) or discards it (error / close /
+    /// stale generation), decrementing `created`. In both cases it wakes one
+    /// waiter for a lease.
     fn giveback(&self, ch: SftpSession, gen: u64, healthy: bool) {
         let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         if healthy && !p.closed && gen == p.generation {
@@ -6434,17 +6434,17 @@ impl SftpFfi {
             p.created = p.created.saturating_sub(1);
             drop(p);
             self.pool_cv.notify_one();
-            // Мёртвый/устаревший канал дропаем под rt.enter() — teardown канала
-            // делает tokio::spawn.
+            // A dead/stale channel is dropped under rt.enter() — the channel teardown
+            // does a tokio::spawn.
             let _enter = self.rt.enter();
             drop(ch);
         }
     }
 
-    /// Открывает один новый SFTP-канал на текущем соединении. block_on нельзя звать
-    /// в контексте рантайма (паника) — здесь мы на blocking-потоке, контекста нет.
-    /// Bounded таймаутом: молча-мёртвое соединение (keepalive off, без RST) иначе
-    /// ждало бы OPEN-CONFIRM вечно.
+    /// Opens one new SFTP channel on the current connection. block_on must not be called
+    /// within a runtime context (panic) — here we are on a blocking thread, there is no context.
+    /// Bounded by a timeout: a silently-dead connection (keepalive off, no RST) would otherwise
+    /// wait for OPEN-CONFIRM forever.
     fn open_channel(&self) -> Result<SftpSession, FfiError> {
         let client_guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
         let client = client_guard
@@ -6458,13 +6458,13 @@ impl SftpFfi {
             .map_err(map_transport_err)
     }
 
-    /// Полный реконнект: пересобирает SSH-соединение из сохранённых параметров
-    /// (креды переразрешаются из волта). Нужен, когда простаивающее соединение
-    /// умерло целиком — открытие канала на мёртвом `Handle` не спасёт (russh отдаёт
-    /// «Channel send error»). Бампает `generation`, поэтому арендованные каналы
-    /// старого поколения при возврате выбрасываются, а idle-каналы дропаются здесь.
+    /// Full reconnect: rebuilds the SSH connection from the saved parameters
+    /// (credentials are re-resolved from the vault). Needed when an idle connection
+    /// has died entirely — opening a channel on a dead `Handle` won't help (russh returns
+    /// "Channel send error"). Bumps `generation`, so leased channels
+    /// of the old generation are discarded on return, and idle channels are dropped here.
     fn reconnect(&self) -> Result<(), FfiError> {
-        // Сеть/handshake вне контекста рантайма (внутри block_on connect_with_state).
+        // Network/handshake outside the runtime context (inside block_on connect_with_state).
         let client = connect_with_state(
             &self.state,
             &self.rt,
@@ -6487,18 +6487,18 @@ impl SftpFfi {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .replace(client);
-        // Пробудить всех ждущих аренды: слоты освободились (created уменьшен).
+        // Wake all lease waiters: slots have freed up (created was decremented).
         self.pool_cv.notify_all();
-        // Старые idle-каналы и клиент дропаются под rt.enter() (teardown → spawn).
+        // The old idle channels and the client are dropped under rt.enter() (teardown → spawn).
         let _enter = self.rt.enter();
         drop(old_idle);
         drop(old_client);
         Ok(())
     }
 
-    /// Закрывает пул и соединение: помечает `closed`, дропает все idle-каналы
-    /// (арендованные закроются при возврате, увидев `closed`) и клиента — всё под
-    /// `rt.enter()`. Общая реализация для [`Self::close`] и `Drop`.
+    /// Closes the pool and the connection: marks `closed`, drops all idle channels
+    /// (leased ones will close on return, seeing `closed`) and the client — all under
+    /// `rt.enter()`. Shared implementation for [`Self::close`] and `Drop`.
     fn teardown(&self) {
         let _enter = self.rt.enter();
         let old_idle = {
@@ -6516,7 +6516,7 @@ impl SftpFfi {
 
 #[uniffi::export]
 impl SftpFfi {
-    /// Список каталога.
+    /// Directory listing.
     pub fn list_dir(&self, path: String) -> Result<Vec<SftpEntry>, FfiError> {
         self.with_sftp(|rt, s| {
             let entries = rt.block_on(s.list_dir(&path)).map_err(map_transport_err)?;
@@ -6533,12 +6533,12 @@ impl SftpFfi {
         })
     }
 
-    /// Скачивает файл целиком.
+    /// Downloads the whole file.
     pub fn read_file(&self, path: String) -> Result<Vec<u8>, FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.read_file(&path)).map_err(map_transport_err))
     }
 
-    /// Загружает файл (создаёт/перезаписывает).
+    /// Uploads a file (creates/overwrites).
     pub fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| {
             rt.block_on(s.write_file(&path, &data))
@@ -6546,23 +6546,23 @@ impl SftpFfi {
         })
     }
 
-    /// Удаляет файл.
+    /// Deletes a file.
     pub fn remove(&self, path: String) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.remove(&path)).map_err(map_transport_err))
     }
 
-    /// Создаёт каталог.
+    /// Creates a directory.
     pub fn mkdir(&self, path: String) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.mkdir(&path)).map_err(map_transport_err))
     }
 
-    /// Возобновляемое скачивание `remote_path` → локальный `local_path` с `offset`
-    /// (для докачки), с прогрессом и отменой. Возвращает `true`, если завершено;
-    /// `false` — если прервано отменой (можно продолжить с нового offset).
-    /// `known_size` — размер удалённого файла, если он уже известен вызывающему
-    /// (напр. из листинга при рекурсивной выгрузке папки): позволяет ядру
-    /// пропустить `stat` и сэкономить round-trip на файл. `None` → ядро сделает
-    /// `stat` само.
+    /// Resumable download of `remote_path` → local `local_path` from `offset`
+    /// (for resuming), with progress and cancellation. Returns `true` if completed;
+    /// `false` — if interrupted by cancellation (can be continued from a new offset).
+    /// `known_size` — the size of the remote file, if it is already known to the caller
+    /// (e.g. from a listing during a recursive folder download): lets the core
+    /// skip the `stat` and save a round-trip per file. `None` → the core will do
+    /// the `stat` itself.
     pub fn sftp_download(
         &self,
         remote_path: String,
@@ -6585,8 +6585,8 @@ impl SftpFfi {
         })
     }
 
-    /// Возобновляемая загрузка локального `local_path` → `remote_path` с `offset`,
-    /// с прогрессом и отменой. Не использует TRUNC — докачка не затирает префикс.
+    /// Resumable upload of local `local_path` → `remote_path` from `offset`,
+    /// with progress and cancellation. Does not use TRUNC — resuming does not overwrite the prefix.
     pub fn sftp_upload(
         &self,
         local_path: String,
@@ -6608,27 +6608,27 @@ impl SftpFfi {
         })
     }
 
-    /// Удаляет каталог.
+    /// Deletes a directory.
     pub fn rmdir(&self, path: String) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.rmdir(&path)).map_err(map_transport_err))
     }
 
-    /// Рекурсивно удаляет каталог со всем содержимым (как `rm -rf`).
+    /// Recursively deletes a directory with all its contents (like `rm -rf`).
     pub fn rmdir_recursive(&self, path: String) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.remove_tree(&path)).map_err(map_transport_err))
     }
 
-    /// Переименовывает/перемещает.
+    /// Renames/moves.
     pub fn rename(&self, from: String, to: String) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.rename(&from, &to)).map_err(map_transport_err))
     }
 
-    /// chmod: меняет права (низшие 12 бит st_mode).
+    /// chmod: changes the permissions (the low 12 bits of st_mode).
     pub fn chmod(&self, path: String, mode: u32) -> Result<(), FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.chmod(&path, mode)).map_err(map_transport_err))
     }
 
-    /// stat по пути.
+    /// stat by path.
     pub fn stat(&self, path: String) -> Result<SftpFileStat, FfiError> {
         self.with_sftp(|rt, s| {
             let st = rt.block_on(s.stat(&path)).map_err(map_transport_err)?;
@@ -6641,17 +6641,17 @@ impl SftpFfi {
         })
     }
 
-    /// Канонизирует путь.
+    /// Canonicalizes a path.
     pub fn realpath(&self, path: String) -> Result<String, FfiError> {
         self.with_sftp(|rt, s| rt.block_on(s.realpath(&path)).map_err(map_transport_err))
     }
 
-    /// Восстанавливает рабочую SFTP-сессию. Сначала дёшево пробует переоткрыть
-    /// канал поверх живого соединения (сервер прибил простаивающий канал); если
-    /// само соединение мертво — типичный случай долгого простоя, когда транспорт
-    /// уже умер и russh отдаёт «Channel send error», — пересобирает соединение с
-    /// нуля и открывает новый канал. `HostKeyMismatch` реконнектом НЕ лечится
-    /// (возможный MITM → стоп), пробрасывается как есть.
+    /// Restores a working SFTP session. First it cheaply tries to reopen a
+    /// channel over the live connection (the server killed the idle channel); if
+    /// the connection itself is dead — the typical case of a long idle when the transport
+    /// has already died and russh returns "Channel send error" — it rebuilds the connection from
+    /// scratch and opens a new channel. `HostKeyMismatch` is NOT cured by reconnecting
+    /// (a possible MITM → stop), it is propagated as-is.
     pub fn reopen(&self) -> Result<(), FfiError> {
         // Serialize concurrent reopens so two racing callers can't each rebuild the
         // connection (one would be orphaned). Held across the whole escalation.
@@ -6659,8 +6659,8 @@ impl SftpFfi {
             .reconnect_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // Быстрый путь: открыть свежий канал на текущем соединении — это и проверка
-        // живости транспорта, и «прогрев» пула. Успех кладём в пул как idle.
+        // Fast path: open a fresh channel on the current connection — this is both a check
+        // of transport liveness and a "warm-up" of the pool. On success we put it into the pool as idle.
         match self.open_channel() {
             Ok(ch) => {
                 let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
@@ -6676,13 +6676,13 @@ impl SftpFfi {
                 self.pool_cv.notify_one();
                 Ok(())
             }
-            // Канал не открылся — вероятно, мёртво само соединение: полный реконнект
-            // (он же пробрасывает HostKeyMismatch при пересборке).
+            // The channel didn't open — the connection itself is probably dead: a full reconnect
+            // (which also propagates HostKeyMismatch on the rebuild).
             Err(_) => self.reconnect(),
         }
     }
 
-    /// Закрывает пул каналов и соединение.
+    /// Closes the channel pool and the connection.
     pub fn close(&self) {
         self.teardown();
     }
@@ -6694,11 +6694,11 @@ impl Drop for SftpFfi {
     }
 }
 
-/// Идентификатор ключа во встроенном агенте, НАМЕСПЕЙСНУТЫЙ по `(vault_id, item_id)`
-/// (A4, sec-review): агент переживает переключения волта и коннекты, а item_id не
-/// уникальны между волтами (напр. все зовут ключ `id_ed25519`). Без namespace второй
-/// `load` короткозамыкался бы на `contains()` и подписывал НЕ тем ключом. Длина-
-/// префикс vault_id гарантирует однозначность. Тот же id строит `Auth::Agent`.
+/// A key identifier in the embedded agent, NAMESPACED by `(vault_id, item_id)`
+/// (A4, sec-review): the agent survives vault switches and connects, while item_ids are not
+/// unique across vaults (e.g. everyone names a key `id_ed25519`). Without a namespace the second
+/// `load` would short-circuit on `contains()` and sign with the WRONG key. The length
+/// prefix on vault_id guarantees uniqueness. The same id builds `Auth::Agent`.
 fn agent_key_id(vault_id: &str, key_item_id: &str) -> Vec<u8> {
     let v = vault_id.as_bytes();
     let k = key_item_id.as_bytes();
@@ -6718,8 +6718,8 @@ fn load_key_into_agent(
     if state.agent.contains(&akid) {
         return Ok(());
     }
-    // Достаём ключ и (если есть) сертификат внутри одной области видимости vault,
-    // чтобы заимствование storage/keyset завершилось до &mut agent ниже.
+    // We fetch the key and (if any) the certificate within a single vault scope,
+    // so that the borrow of storage/keyset ends before the &mut agent below.
     let (key_item, cert_str) = {
         let vault = Vault::open(
             &state.storage,
@@ -6751,9 +6751,9 @@ fn load_key_into_agent(
     Ok(())
 }
 
-/// Ключ SQLCipher выводится из секретов keyset (нужна разблокировка, чтобы
-/// открыть БД). HKDF-SHA256 поверх приватных X25519+Ed25519. Все промежуточные
-/// копии секретов и сам ключ — в `Zeroizing`, зануляются при выходе/Drop.
+/// The SQLCipher key is derived from the keyset secrets (an unlock is needed to
+/// open the DB). HKDF-SHA256 over the private X25519+Ed25519. All intermediate
+/// copies of the secrets and the key itself are in `Zeroizing`, zeroized on exit/Drop.
 fn derive_db_key(keyset: &unissh_keychain::UnlockedKeyset) -> Zeroizing<[u8; 32]> {
     let x_secret = Zeroizing::new(keyset.encryption.secret.expose_to_bytes());
     let e_secret = Zeroizing::new(keyset.signing.signing.expose_to_bytes());
@@ -6781,10 +6781,10 @@ mod tests {
             p.push(".pre-migration.bak");
             std::path::PathBuf::from(p)
         };
-        // Сайдкара нет → no-op (без паники, без .bak).
+        // No sidecar → no-op (no panic, no .bak).
         backup_keyset_sidecar(&path);
-        assert!(!bak.exists(), "нет бэкапа, если сайдкара ещё нет");
-        // Сайдкар есть → создаётся .bak с тем же содержимым.
+        assert!(!bak.exists(), "no backup if there is no sidecar yet");
+        // A sidecar exists → a .bak is created with the same content.
         std::fs::write(&path, b"OLD-KEYSET-BLOB").unwrap();
         backup_keyset_sidecar(&path);
         assert_eq!(std::fs::read(&bak).unwrap(), b"OLD-KEYSET-BLOB");
@@ -6800,11 +6800,11 @@ mod tests {
         assert_eq!(dec.personal_vault_id, p.personal_vault_id);
         assert_eq!(dec.default_username, "deploy");
 
-        // Пустые поля = «не задано».
+        // Empty fields = "not set".
         let de = AccountStatePayload::decode(&AccountStatePayload::default().encode()).unwrap();
         assert!(de.personal_vault_id.is_empty() && de.default_username.is_empty());
 
-        // Битый вход отвергается (не паникует).
+        // Broken input is rejected (does not panic).
         assert!(AccountStatePayload::decode(&[0, 0, 0, 9, 1, 2, 3]).is_err()); // len>data
         assert!(AccountStatePayload::decode(&[]).is_err());
         let mut trailing = p.encode();
@@ -6814,21 +6814,21 @@ mod tests {
 
     #[test]
     fn agent_key_id_namespaces_by_vault_and_item() {
-        // Одинаковый item_id в РАЗНЫХ волтах → разные agent-id (нет aliasing).
+        // The same item_id in DIFFERENT vaults → different agent-ids (no aliasing).
         assert_ne!(
             agent_key_id("vaultA", "id_ed25519"),
             agent_key_id("vaultB", "id_ed25519")
         );
-        // Одна пара → один id (load и Auth::Agent совпадают).
+        // One pair → one id (load and Auth::Agent match).
         assert_eq!(agent_key_id("v", "k"), agent_key_id("v", "k"));
-        // Длина-префикс исключает склейку: ("v","aultk") != ("va","ultk").
+        // The length prefix rules out concatenation: ("v","aultk") != ("va","ultk").
         assert_ne!(agent_key_id("v", "aultk"), agent_key_id("va", "ultk"));
     }
 
-    /// Регрессия (A4a namespace): delete_item и замена материала ключа ДОЛЖНЫ
-    /// выгружать приватник из in-memory агента под тем же namespaced-ключом
-    /// agent_key_id(vault,item), которым он был загружен — иначе remove — no-op и
-    /// отозванный/заменённый ключ остаётся живым и подписывающим до конца сессии.
+    /// Regression (A4a namespace): delete_item and replacing key material MUST
+    /// unload the private key from the in-memory agent under the same namespaced key
+    /// agent_key_id(vault,item) it was loaded with — otherwise remove is a no-op and
+    /// a revoked/replaced key stays alive and signing until the end of the session.
     #[test]
     fn revoking_key_evicts_it_from_agent() {
         let dir = tempfile::tempdir().unwrap();
@@ -6839,7 +6839,7 @@ mod tests {
         core.create_account(None).unwrap();
         core.create_vault("v".into(), "V".into()).unwrap();
 
-        // delete_item выгружает загруженный ключ.
+        // delete_item unloads the loaded key.
         core.generate_ssh_key("v".into(), "k".into()).unwrap();
         let akid = agent_key_id("v", "k");
         {
@@ -6847,16 +6847,16 @@ mod tests {
             load_key_into_agent(guard.as_mut().unwrap(), "v", "k").unwrap();
             assert!(
                 guard.as_ref().unwrap().agent.contains(&akid),
-                "ключ загружен под namespaced id"
+                "the key is loaded under the namespaced id"
             );
         }
         core.delete_item("v".into(), "k".into()).unwrap();
         assert!(
             !core.locked_state().as_ref().unwrap().agent.contains(&akid),
-            "delete_item обязан выгрузить ключ из агента (иначе обход отзыва)"
+            "delete_item must unload the key from the agent (otherwise revocation is bypassed)"
         );
 
-        // Замена материала под тем же id (generate поверх) тоже выгружает старый.
+        // Replacing the material under the same id (generate over it) also unloads the old one.
         core.generate_ssh_key("v".into(), "k2".into()).unwrap();
         let akid2 = agent_key_id("v", "k2");
         {
@@ -6867,13 +6867,13 @@ mod tests {
         core.generate_ssh_key("v".into(), "k2".into()).unwrap();
         assert!(
             !core.locked_state().as_ref().unwrap().agent.contains(&akid2),
-            "замена материала обязана выгрузить прежний ключ"
+            "replacing the material must unload the previous key"
         );
     }
 
-    /// #9: повторный import_ssh_config сохраняет неизменяемый uid профиля —
-    /// binding'и и hop_ref'ы завязаны на него, свежий uid при перезаписи
-    /// осиротил бы их.
+    /// #9: a repeated import_ssh_config preserves the profile's immutable uid —
+    /// bindings and hop_refs are tied to it, a fresh uid on overwrite
+    /// would orphan them.
     #[test]
     fn import_ssh_config_preserves_uid_on_overwrite() {
         let dir = tempfile::tempdir().unwrap();
@@ -6892,19 +6892,19 @@ mod tests {
         let uid1 = core.get_connection("v".into(), "web".into()).unwrap().uid;
         assert!(!uid1.is_empty());
 
-        // Перезапись тем же алиасом (сменился порт) — uid обязан сохраниться.
+        // Overwriting with the same alias (the port changed) — the uid must be preserved.
         core.import_ssh_config(
             "v".into(),
             "Host web\n  HostName web.example\n  Port 2222\n  User deploy\n".into(),
         )
         .unwrap();
         let p2 = core.get_connection("v".into(), "web".into()).unwrap();
-        assert_eq!(p2.uid, uid1, "uid сохраняется при перезаписи (#9)");
-        assert_eq!(p2.port, 2222, "остальные поля обновились");
+        assert_eq!(p2.uid, uid1, "the uid is preserved on overwrite (#9)");
+        assert_eq!(p2.port, 2222, "the other fields were updated");
     }
 
-    /// Легаси-профиль (до password-items): `key_item_id` плоским полем, у jump —
-    /// обязательной строкой (возможно пустой). Должен читаться без миграции.
+    /// A legacy profile (before password items): `key_item_id` as a flat field, and for a jump —
+    /// as a mandatory string (possibly empty). Must be readable without migration.
     #[test]
     fn legacy_stored_profile_deserializes() {
         let legacy = r#"{
@@ -6919,18 +6919,18 @@ mod tests {
             &prof.auth,
             ProfileAuth::Key { key_item_id } if key_item_id == "k1"
         ));
-        // Хоп профиля vault-квалифицирован волтом профиля.
+        // A profile's hop is vault-qualified by the profile's vault.
         assert!(matches!(
             &prof.jumps[0].auth,
             AuthMethod::Agent { vault_id, key_item_id } if vault_id == "vaultA" && key_item_id == "k2"
         ));
-        // пустой key_item_id (импорт ssh-config) — семантика «не назначен»
+        // an empty key_item_id (ssh-config import) — the "not assigned" semantics
         assert!(matches!(
             &prof.jumps[1].auth,
             AuthMethod::Agent { vault_id, key_item_id } if vault_id == "vaultA" && key_item_id.is_empty()
         ));
 
-        // легаси «парольный» профиль: key_item_id = null → спросить при коннекте
+        // a legacy "password" profile: key_item_id = null → prompt at connect time
         let legacy_pw = r#"{"label":"L","host":"h","port":22,"user":"u",
                             "key_item_id":null,"jumps":[]}"#;
         let stored: StoredProfile = serde_json::from_str(legacy_pw).unwrap();
@@ -6938,8 +6938,8 @@ mod tests {
         assert!(matches!(prof.auth, ProfileAuth::PromptPassword));
     }
 
-    /// Новый формат: ссылка на пароль-item приоритетнее ключа и переживает
-    /// сериализацию туда-обратно.
+    /// New format: a reference to a password item takes priority over a key and survives
+    /// a round-trip serialization.
     #[test]
     fn vault_password_profile_roundtrip() {
         let prof = ConnectionProfile {
@@ -6996,18 +6996,18 @@ mod tests {
             &prof2.auth,
             ProfileAuth::VaultPassword { password_item_id } if password_item_id == "pw1"
         ));
-        // Хоп восстанавливается с волтом профиля (vault-относительное хранение).
+        // The hop is restored with the profile's vault (vault-relative storage).
         assert!(matches!(
             &prof2.jumps[0].auth,
             AuthMethod::VaultPassword { vault_id, password_item_id }
                 if vault_id == "vp" && password_item_id == "pw2"
         ));
-        // uid переживает round-trip (не переминчивается при чтении сохранённого).
+        // The uid survives the round-trip (not re-minted when reading a saved one).
         assert_eq!(prof2.uid, "uid-fixed");
         assert_eq!(prof2.tags, vec!["prod".to_string()]);
     }
 
-    /// Inline-пароль в jump-хосте не сериализуется в профиль — ошибка.
+    /// An inline password in a jump host is not serialized into a profile — an error.
     #[test]
     fn inline_jump_password_is_rejected() {
         let jump = JumpHost {
@@ -7022,8 +7022,8 @@ mod tests {
         assert!(jump_to_stored(jump).is_err());
     }
 
-    /// A4b: ссылка профиля на креды получает `vault_id` того волта, где живёт
-    /// профиль, — чтобы цель и хопы могли резолвиться против РАЗНЫХ волтов.
+    /// A4b: a profile's credential reference gets the `vault_id` of the vault where the
+    /// profile lives — so the target and hops can resolve against DIFFERENT vaults.
     #[test]
     fn profile_auth_is_vault_qualified() {
         assert!(matches!(
@@ -7038,14 +7038,14 @@ mod tests {
             AuthMethod::VaultPassword { vault_id, password_item_id }
                 if vault_id == "personal" && password_item_id == "pw"
         ));
-        // PromptPassword не привязан к волту (inline, спрашивается при коннекте).
+        // PromptPassword is not tied to a vault (inline, prompted at connect time).
         assert!(matches!(
             profile_auth_to_method("any", ProfileAuth::PromptPassword),
             AuthMethod::Password { password } if password.is_empty()
         ));
     }
 
-    /// B2.2: host-chain-ссылка хопа переживает jump_to_stored → stored_to_profile.
+    /// B2.2: a hop's host-chain reference survives jump_to_stored → stored_to_profile.
     #[test]
     fn hop_ref_roundtrip() {
         let j = JumpHost {
@@ -7083,7 +7083,7 @@ mod tests {
         assert_eq!(hr.profile_uid, "uid-bastion");
     }
 
-    /// B2.2: resolve_profile_by_uid находит профиль-бастион по его uid.
+    /// B2.2: resolve_profile_by_uid finds a bastion profile by its uid.
     #[test]
     fn resolve_profile_by_uid_finds_bastion() {
         let dir = tempfile::tempdir().unwrap();
@@ -7110,7 +7110,7 @@ mod tests {
         )
         .unwrap();
         let bastion = core.get_connection("v".into(), "bastion".into()).unwrap();
-        // По uid находим бастион.
+        // We find the bastion by uid.
         {
             let guard = core.locked_state();
             let state = guard.as_ref().unwrap();
@@ -7119,7 +7119,7 @@ mod tests {
             assert_eq!(found.port, 2222);
             assert_eq!(found.user, "jump");
         }
-        // Неизвестный uid → NotFound.
+        // An unknown uid → NotFound.
         {
             let guard = core.locked_state();
             let state = guard.as_ref().unwrap();
@@ -7127,8 +7127,8 @@ mod tests {
         }
     }
 
-    /// B1: тело идентичности сериализуется туда-обратно; отсутствующие
-    /// опциональные ссылки читаются как `None` (forward-совместимость).
+    /// B1: the identity body round-trips through serialization; missing
+    /// optional references read as `None` (forward compatibility).
     #[test]
     fn stored_identity_roundtrip_and_into() {
         let stored = StoredIdentity {
@@ -7145,20 +7145,20 @@ mod tests {
         assert_eq!(id.user, "alice");
         assert_eq!(id.key_item_id.as_deref(), Some("id_ed25519"));
         assert!(id.password_item_id.is_none());
-        // минимальное тело (без ссылок) — обе ссылки None.
+        // a minimal body (no references) — both references None.
         let minimal = r#"{"label":"L","user":"bob"}"#;
         let m: StoredIdentity = serde_json::from_str(minimal).unwrap();
         assert!(m.key_item_id.is_none() && m.password_item_id.is_none());
     }
 
-    /// B2: uid профиля. Легаси-fallback детерминирован (стабилен между
-    /// устройствами и вызовами); свежеминченный — уникален и непуст.
+    /// B2: a profile's uid. The legacy fallback is deterministic (stable across
+    /// devices and calls); a freshly minted one is unique and non-empty.
     #[test]
     fn profile_uid_legacy_deterministic_and_mint_unique() {
         let a = legacy_profile_uid("vault1", "prod-web");
         assert_eq!(a, legacy_profile_uid("vault1", "prod-web"));
-        assert_eq!(a.len(), 32); // 16 байт в hex
-                                 // Длина-префикс vault_id исключает склейку соседних полей.
+        assert_eq!(a.len(), 32); // 16 bytes in hex
+                                 // The length prefix on vault_id rules out concatenation of adjacent fields.
         assert_ne!(
             legacy_profile_uid("vault1", "prod-web"),
             legacy_profile_uid("vault", "1prod-web")
@@ -7167,14 +7167,14 @@ mod tests {
             legacy_profile_uid("vault1", "prod-web"),
             legacy_profile_uid("vault1", "prod-db")
         );
-        // Минт: непуст, уникален между вызовами (с подавляющей вероятностью).
+        // Mint: non-empty, unique between calls (with overwhelming probability).
         let m1 = mint_profile_uid();
         assert_eq!(m1.len(), 32);
         assert_ne!(m1, mint_profile_uid());
     }
 
-    /// B3.1: анти-редирект-логика. Расхождение назначения НИКОГДА не «обучается»
-    /// молча — всегда `Redirected` (нужен явный re-bind).
+    /// B3.1: anti-redirect logic. A destination mismatch is NEVER silently
+    /// "learned" — always `Redirected` (an explicit re-bind is required).
     #[test]
     fn resolve_binding_anti_redirect() {
         let b = IdentityBinding {
@@ -7183,19 +7183,19 @@ mod tests {
             identity_item_id: "ident1".into(),
             destination_pin: "prod-web:22".into(),
         };
-        // Нет привязки → fallback.
+        // No binding → fallback.
         assert_eq!(
             resolve_binding(None, "prod-web:22"),
             BindingResolution::Unbound
         );
-        // Совпало → можно логиниться личной идентичностью.
+        // Matched → one may log in with the personal identity.
         assert_eq!(
             resolve_binding(Some(&b), "prod-web:22"),
             BindingResolution::Matched {
                 identity_item_id: "ident1".into()
             }
         );
-        // Хост переклеен (host in-place) → отказ, а не молчаливая переотправка кредов.
+        // The host was re-pointed (host in-place) → refusal, not a silent re-send of credentials.
         assert_eq!(
             resolve_binding(Some(&b), "evil-host:22"),
             BindingResolution::Redirected {
@@ -7203,15 +7203,15 @@ mod tests {
                 current: "evil-host:22".into()
             }
         );
-        // Смена порта тоже считается редиректом.
+        // A port change also counts as a redirect.
         assert!(matches!(
             resolve_binding(Some(&b), "prod-web:2222"),
             BindingResolution::Redirected { .. }
         ));
     }
 
-    /// B3.1: item_id привязки детерминирован от (team_vault_id, profile_uid) и
-    /// не склеивает соседние поля (длина-префикс).
+    /// B3.1: a binding's item_id is derived from (team_vault_id, profile_uid) and
+    /// does not concatenate adjacent fields (length prefix).
     #[test]
     fn binding_item_id_deterministic_and_unambiguous() {
         assert_eq!(
@@ -7222,7 +7222,7 @@ mod tests {
             binding_item_id("team", "uid1"),
             binding_item_id("team", "uid2")
         );
-        // ("team","1uid1") != ("team1","uid1") — благодаря len-префиксу.
+        // ("team","1uid1") != ("team1","uid1") — thanks to the len prefix.
         assert_ne!(
             binding_item_id("team", "1uid1"),
             binding_item_id("team1", "uid1")
@@ -7230,7 +7230,7 @@ mod tests {
         assert!(binding_item_id("team", "uid1").starts_with("binding:"));
     }
 
-    /// B3.1: тело привязки переживает сериализацию туда-обратно.
+    /// B3.1: the binding body survives a round-trip serialization.
     #[test]
     fn stored_binding_roundtrip() {
         let stored = StoredBinding {
@@ -7249,9 +7249,9 @@ mod tests {
         assert_eq!(b.destination_pin, "h:22");
     }
 
-    /// B7: forward-compat. Неизвестное поле (от будущей версии) захватывается в
-    /// `extra` и переживает deserialize→serialize; пустой `extra` не добавляет
-    /// ключей (существующие подписанные items байт-в-байт не меняются).
+    /// B7: forward-compat. An unknown field (from a future version) is captured in
+    /// `extra` and survives deserialize→serialize; an empty `extra` adds no
+    /// keys (existing signed items do not change byte-for-byte).
     #[test]
     fn stored_profile_preserves_unknown_fields() {
         let json = r#"{"uid":"u","label":"L","host":"h","port":22,"user":"x",
@@ -7264,7 +7264,7 @@ mod tests {
         assert_eq!(sp.extra.get("future_num").and_then(|v| v.as_i64()), Some(7));
         let out = serde_json::to_string(&sp).unwrap();
         assert!(out.contains("future_field") && out.contains("future_num"));
-        // Пустой extra → никаких лишних ключей.
+        // Empty extra → no extra keys.
         let sp0: StoredProfile = serde_json::from_str(
             r#"{"label":"L","host":"h","port":22,"user":"x","jumps":[],"tags":[]}"#,
         )
@@ -7273,8 +7273,8 @@ mod tests {
         assert!(!serde_json::to_string(&sp0).unwrap().contains("extra"));
     }
 
-    /// B7: правка профиля клиентом, НЕ знающим поле будущей версии, СОХРАНЯЕТ его
-    /// (merge-on-save) — нет молчаливого LWW-даунгрейда.
+    /// B7: an edit of a profile by a client that does NOT know a future-version field PRESERVES it
+    /// (merge-on-save) — no silent LWW downgrade.
     #[test]
     fn save_connection_preserves_future_fields_on_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -7300,8 +7300,8 @@ mod tests {
             },
         )
         .unwrap();
-        // Инжектим «поле будущей версии» прямо в сохранённый JSON (как более
-        // новый клиент), в обход публичного API.
+        // We inject a "future-version field" straight into the saved JSON (like a newer
+        // client), bypassing the public API.
         let read_future = || -> Option<String> {
             let mut guard = core.locked_state();
             let st = guard.as_mut().unwrap();
@@ -7326,16 +7326,16 @@ mod tests {
             vault.put_item(b"p", ITEM_TYPE_CONNECTION, &json).unwrap();
         }
         assert_eq!(read_future(), Some("keep".to_string()));
-        // Текущий клиент (не знает "future") правит профиль.
+        // The current client (which doesn't know "future") edits the profile.
         let mut p = core.get_connection("v".into(), "p".into()).unwrap();
         p.label = "renamed".into();
         core.save_connection("v".into(), p).unwrap();
-        // Поле пережило правку.
+        // The field survived the edit.
         assert_eq!(read_future(), Some("keep".to_string()));
     }
 
-    /// B3.1/B3.2: binding CRUD против живого Core + first-bind guard (молчаливый
-    /// пере-пин на другое назначение без allow_rebind отвергается).
+    /// B3.1/B3.2: binding CRUD against a live Core + first-bind guard (a silent
+    /// re-pin to a different destination without allow_rebind is rejected).
     #[test]
     fn binding_crud_and_first_bind_guard() {
         let dir = tempfile::tempdir().unwrap();
@@ -7352,7 +7352,7 @@ mod tests {
             identity_item_id: "ident1".into(),
             destination_pin: "prod-web:22".into(),
         };
-        // Первая привязка — ок.
+        // The first binding — ok.
         core.set_binding("personal".into(), b.clone(), false)
             .unwrap();
         let got = core
@@ -7361,20 +7361,20 @@ mod tests {
             .unwrap();
         assert_eq!(got.identity_item_id, "ident1");
         assert_eq!(got.destination_pin, "prod-web:22");
-        // Идемпотентный пере-пин (то же назначение, смена только идентичности) —
-        // без флага ок.
+        // An idempotent re-pin (the same destination, changing only the identity) —
+        // ok without the flag.
         let mut b2 = b.clone();
         b2.identity_item_id = "ident2".into();
         core.set_binding("personal".into(), b2, false).unwrap();
-        // Пере-пин на ДРУГОЕ назначение без allow_rebind — отказ.
+        // A re-pin to a DIFFERENT destination without allow_rebind — refused.
         let mut b3 = b.clone();
         b3.destination_pin = "evil:22".into();
         assert!(core
             .set_binding("personal".into(), b3.clone(), false)
             .is_err());
-        // С allow_rebind=true — ок.
+        // With allow_rebind=true — ok.
         core.set_binding("personal".into(), b3, true).unwrap();
-        // resolve_host_binding отражает пин: совпало → Matched, иначе → Redirected.
+        // resolve_host_binding reflects the pin: matched → Matched, otherwise → Redirected.
         assert!(matches!(
             core.resolve_host_binding(
                 "personal".into(),
@@ -7396,7 +7396,7 @@ mod tests {
             BindingResolution::Redirected { .. }
         ));
         assert_eq!(core.list_bindings("personal".into()).unwrap().len(), 1);
-        // Удаление.
+        // Deletion.
         core.delete_binding("personal".into(), "team".into(), "uid1".into())
             .unwrap();
         assert!(core
@@ -7405,16 +7405,16 @@ mod tests {
             .is_none());
     }
 
-    /// Username-шаблон: `%u` → username идентичности; шаблон входит в destination-пин
-    /// (правка шаблона → смена назначения → анти-редирект). Гейтвей-агностично.
+    /// Username template: `%u` → the identity's username; the template is part of the destination pin
+    /// (editing the template → changing the destination → anti-redirect). Gateway-agnostic.
     #[test]
     fn username_template_render_destination_and_username() {
         let nj: &[JumpHost] = &[];
-        // Без шаблона: обычные host:port и base username.
+        // Without a template: plain host:port and the base username.
         assert_eq!(personal_destination("h", 22, None, nj), "h:22");
         assert_eq!(personal_destination("h", 22, Some(""), nj), "h:22");
         assert_eq!(apply_username_template("alice", None), "alice");
-        // С шаблоном: он входит в назначение, а %u раскрывается в username.
+        // With a template: it is part of the destination, and %u expands into the username.
         assert_eq!(
             personal_destination("gw", 22, Some("%u:prod-db"), nj),
             "gw:22#%u:prod-db"
@@ -7423,22 +7423,22 @@ mod tests {
             apply_username_template("alice", Some("%u:prod-db")),
             "alice:prod-db"
         );
-        // Другой формат гейтвея — тоже работает (не только warpgate `:`).
+        // A different gateway format also works (not only warpgate `:`).
         assert_eq!(
             apply_username_template("alice", Some("%u@edge")),
             "alice@edge"
         );
-        // Разные шаблоны → разные назначения (правка ловится анти-редиректом).
+        // Different templates → different destinations (an edit is caught by anti-redirect).
         assert_ne!(
             personal_destination("gw", 22, Some("%u:prod-db"), nj),
             personal_destination("gw", 22, Some("%u:prod-web"), nj)
         );
-        // trim по краям.
+        // trim at the edges.
         assert_eq!(apply_username_template("alice", Some("  %u:x ")), "alice:x");
 
-        // Анти-редирект по ЦЕПОЧКЕ ПРЫЖКОВ (#1): вставка прыжка меняет назначение
-        // даже при том же host:port — иначе админ увёл бы личный кред через
-        // MITM-хоп. Хост без прыжков даёт прежнюю строку (обратная совместимость).
+        // Anti-redirect over the JUMP CHAIN (#1): inserting a jump changes the destination
+        // even with the same host:port — otherwise an admin could siphon off the personal credential via
+        // a MITM hop. A host without jumps yields the previous string (backward compatibility).
         let jump = JumpHost {
             host: "attacker.com".into(),
             port: 22,
@@ -7453,7 +7453,7 @@ mod tests {
         assert_ne!(
             personal_destination("h", 22, None, nj),
             personal_destination("h", 22, None, std::slice::from_ref(&jump)),
-            "появление прыжка обязано менять пин (fail-safe анти-редирект)"
+            "the appearance of a jump must change the pin (fail-safe anti-redirect)"
         );
         assert!(
             personal_destination("h", 22, None, std::slice::from_ref(&jump))
@@ -7461,8 +7461,8 @@ mod tests {
         );
     }
 
-    /// B4: username-цепочка. Первый непустой (trim) из
-    /// identity → fallback профиля → account-default.
+    /// B4: the username chain. The first non-empty (trimmed) of
+    /// identity → profile fallback → account-default.
     #[test]
     fn pick_username_chain() {
         assert_eq!(pick_username("alice", "prof", Some("acct")), "alice");
@@ -7472,9 +7472,9 @@ mod tests {
         assert_eq!(pick_username("", "", Some("  ")), "");
     }
 
-    /// Co-location / multi-vault: идентичность+привязка могут лежать в ЛЮБОМ приватном
-    /// волте, а НЕ в «личном» указателе (его тут вообще не ставим). resolve ищет по
-    /// волтам аккаунта и находит — так разные хосты логинятся из разных волтов.
+    /// Co-location / multi-vault: the identity + binding may live in ANY private
+    /// vault, NOT in the "personal" pointer (which we don't set here at all). resolve searches across
+    /// the account's vaults and finds it — this way different hosts log in from different vaults.
     #[test]
     fn resolve_personal_auth_finds_binding_in_any_private_vault() {
         let dir = tempfile::tempdir().unwrap();
@@ -7483,7 +7483,7 @@ mod tests {
             dir.path().join("i.keyset").to_string_lossy().to_string(),
         );
         core.create_account(None).unwrap();
-        // Рабочий приватный волт — НЕ назначенный личным (set_personal_vault не зовём).
+        // A working private vault — NOT assigned as the personal one (we don't call set_personal_vault).
         let work = "aabbccddeeff00112233445566778899";
         core.create_vault(work.into(), "Work".into()).unwrap();
         core.save_identity(
@@ -7527,9 +7527,9 @@ mod tests {
         }
     }
 
-    /// B4: resolve_personal_auth разворачивает личный кред ТОЛЬКО для
-    /// закреплённого назначения; при редиректе/без привязки — ошибка (кред не
-    /// уходит на переклеенный хост).
+    /// B4: resolve_personal_auth unwraps the personal credential ONLY for
+    /// the pinned destination; on a redirect/without a binding — an error (the credential does not
+    /// go to a re-pointed host).
     #[test]
     fn resolve_personal_auth_enforces_anti_redirect() {
         let dir = tempfile::tempdir().unwrap();
@@ -7538,7 +7538,7 @@ mod tests {
             dir.path().join("i.keyset").to_string_lossy().to_string(),
         );
         core.create_account(None).unwrap();
-        // Личный волт — cloud-волт (hex-id); set_personal_vault ждёт hex.
+        // The personal vault is a cloud vault (hex id); set_personal_vault expects hex.
         let pv = "00112233445566778899aabbccddeeff";
         core.create_vault(pv.into(), "Personal".into()).unwrap();
         core.set_personal_vault(pv.into()).unwrap();
@@ -7564,7 +7564,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // Назначение совпало → личный кред + username из идентичности.
+        // The destination matched → the personal credential + the username from the identity.
         let pa = core
             .resolve_personal_auth(
                 "team".into(),
@@ -7584,7 +7584,7 @@ mod tests {
         } else {
             panic!("expected Agent auth from personal vault");
         }
-        // Хост переклеен → ОШИБКА (кред не разворачивается для чужого хоста).
+        // The host was re-pointed → ERROR (the credential is not unwrapped for the wrong host).
         assert!(core
             .resolve_personal_auth(
                 "team".into(),
@@ -7593,7 +7593,7 @@ mod tests {
                 "fallbackuser".into(),
             )
             .is_err());
-        // Нет привязки для этого uid → ошибка «нужно связать».
+        // No binding for this uid → the error "linking is required".
         assert!(core
             .resolve_personal_auth(
                 "team".into(),
@@ -7604,8 +7604,8 @@ mod tests {
             .is_err());
     }
 
-    /// B4.3-fix: Personal-хост НЕ уходит в fan-out с пустым паролем — исключается
-    /// из tag- и group-путей (иначе был бы live-коннект без привязки/анти-редиректа).
+    /// B4.3-fix: a Personal host does NOT go into fan-out with an empty password — it is excluded
+    /// from the tag and group paths (otherwise there would be a live connect without a binding/anti-redirect).
     #[test]
     fn personal_host_excluded_from_fanout() {
         let dir = tempfile::tempdir().unwrap();
@@ -7640,13 +7640,13 @@ mod tests {
             ),
         )
         .unwrap();
-        // Tag fan-out: Personal исключён → только key-host в целях.
+        // Tag fan-out: Personal is excluded → only the key host among the targets.
         let targets = core
             .select_targets_by_tags("v".into(), vec!["prod".into()], false)
             .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].host, "web");
-        // Group fan-out: dry-run помечает Personal-члена статусом Personal (исключён).
+        // Group fan-out: the dry-run marks a Personal member with the Personal status (excluded).
         core.save_group(
             "v".into(),
             ServerGroup {
@@ -7667,8 +7667,8 @@ mod tests {
         assert_eq!(keyh.status, ResolveStatus::Ok);
     }
 
-    /// B6: BOUND Personal-хост попадает в fan-out с РАЗРЕШЁННЫМИ user+auth
-    /// (личная идентичность из привязки), непривязанный — исключается.
+    /// B6: a BOUND Personal host makes it into fan-out with the RESOLVED user+auth
+    /// (the personal identity from the binding); an unbound one is excluded.
     #[test]
     fn personal_host_bound_included_in_fanout() {
         let dir = tempfile::tempdir().unwrap();
@@ -7717,7 +7717,7 @@ mod tests {
             ),
         )
         .unwrap();
-        // Привязываем личную идентичность к Personal-хосту (пин = его назначение).
+        // Bind the personal identity to the Personal host (the pin = its destination).
         let ph = core
             .get_connection("v".into(), "personal-host".into())
             .unwrap();
@@ -7738,7 +7738,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // Tag fan-out: привязанный Personal-хост включён с разрешёнными user+auth.
+        // Tag fan-out: the bound Personal host is included with the resolved user+auth.
         let targets = core
             .select_targets_by_tags("v".into(), vec!["prod".into()], false)
             .unwrap();
@@ -7750,7 +7750,7 @@ mod tests {
             AuthMethod::Agent { vault_id, key_item_id }
                 if vault_id.as_str() == pv && key_item_id == "k"
         ));
-        // Group fan-out: dry-run помечает привязанный Personal-хост как Ok.
+        // Group fan-out: the dry-run marks the bound Personal host as Ok.
         core.save_group(
             "v".into(),
             ServerGroup {
@@ -7782,7 +7782,7 @@ mod tests {
 
     #[test]
     fn tags_default_to_empty_for_legacy_profile() {
-        // Профиль без поля tags (легаси) читается, tags пустые.
+        // A profile without a tags field (legacy) is read, tags are empty.
         let legacy = r#"{"label":"L","host":"h","port":22,"user":"u",
                          "key_item_id":"k","jumps":[]}"#;
         let stored: StoredProfile = serde_json::from_str(legacy).unwrap();
@@ -7793,7 +7793,7 @@ mod tests {
     #[test]
     fn tag_matching_any_and_all() {
         let host = ["prod".to_string(), "web".to_string(), "eu".to_string()];
-        // any: пересечение непусто
+        // any: the intersection is non-empty
         assert!(tags_match(&host, &["prod".to_string()], false));
         assert!(tags_match(
             &host,
@@ -7801,7 +7801,7 @@ mod tests {
             false
         ));
         assert!(!tags_match(&host, &["x".to_string()], false));
-        // all: запрос ⊆ тегов хоста
+        // all: query ⊆ the host's tags
         assert!(tags_match(
             &host,
             &["prod".to_string(), "web".to_string()],
@@ -7812,29 +7812,29 @@ mod tests {
             &["prod".to_string(), "db".to_string()],
             true
         ));
-        // пустой запрос → не выбираем ничего (защита от «exec на всё»)
+        // an empty query → we select nothing (protection against "exec on everything")
         assert!(!tags_match(&host, &[], false));
         assert!(!tags_match(&host, &[], true));
     }
 
-    /// Чистый flatten вложенных групп: дедупликация, защита от циклов, лимит
-    /// глубины. Граф задаётся map'ами без БД.
+    /// Pure flatten of nested groups: deduplication, cycle protection, a depth
+    /// limit. The graph is given by maps without a DB.
     #[test]
     fn flatten_group_members_respects_depth_limit() {
         use std::collections::{HashMap, HashSet};
-        // Цепочка g0->g1->...->g40, у каждой следующая группа + терминальный профиль.
+        // A chain g0->g1->...->g40, each with the next group + a terminal profile.
         let profiles: HashSet<String> = ["p_end".to_string()].into_iter().collect();
         let mut groups: HashMap<String, Vec<String>> = HashMap::new();
         for i in 0..40 {
             groups.insert(format!("g{i}"), vec![format!("g{}", i + 1)]);
         }
         groups.insert("g40".to_string(), vec!["p_end".to_string()]);
-        // не должно переполнить стек; глубже лимита — CycleSkipped, не паника.
+        // must not overflow the stack; beyond the limit — CycleSkipped, not a panic.
         let (members, issues) = flatten_group_members(&groups, &profiles, "g0", GROUP_MAX_DEPTH);
         assert!(issues
             .iter()
             .any(|(_, st)| *st == ResolveStatus::CycleSkipped));
-        // профиль за пределами лимита глубины не раскрыт
+        // a profile beyond the depth limit is not expanded
         assert!(members.is_empty());
     }
 
@@ -7844,19 +7844,19 @@ mod tests {
         let profiles: std::collections::HashSet<String> =
             ["p1", "p2", "p3"].iter().map(|s| s.to_string()).collect();
         let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-        // A → [p1, B, p2]; B → [p2, p3, A(цикл)]
+        // A → [p1, B, p2]; B → [p2, p3, A(cycle)]
         groups.insert("A".to_string(), vec!["p1".into(), "B".into(), "p2".into()]);
         groups.insert("B".to_string(), vec!["p2".into(), "p3".into(), "A".into()]);
 
         let (members, issues) = flatten_group_members(&groups, &profiles, "A", GROUP_MAX_DEPTH);
-        // профили раскрыты по одному разу, в порядке обхода
+        // profiles are expanded once each, in traversal order
         assert_eq!(members, vec!["p1", "p2", "p3"]);
-        // цикл A→B→A отмечен, но не зациклил
+        // the cycle A→B→A is marked but did not loop
         assert!(issues
             .iter()
             .any(|(_, s)| *s == ResolveStatus::CycleSkipped));
 
-        // висячий член и член-не-группа-не-профиль
+        // a dangling member and a member that is neither a group nor a profile
         let mut g2: HashMap<String, Vec<String>> = HashMap::new();
         g2.insert("G".to_string(), vec!["p1".into(), "ghost".into()]);
         let (m2, iss2) = flatten_group_members(&g2, &profiles, "G", GROUP_MAX_DEPTH);

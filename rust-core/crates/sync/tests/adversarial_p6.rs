@@ -234,7 +234,7 @@ fn teammate_vault_applied_only_after_anchor_pin() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::AuthorityFailed)),
-        "чужой волт без пина должен быть AuthorityFailed: {r:?}"
+        "a teammate's vault without a pin must be AuthorityFailed: {r:?}"
     );
     assert!(sb.get_membership_manifest(&vid, 1).unwrap().is_none());
 
@@ -246,7 +246,7 @@ fn teammate_vault_applied_only_after_anchor_pin() {
     let r2 = sync_pull(&mut t, &sb, &ctx(&kb)).unwrap();
     assert_eq!(
         r2.applied, 1,
-        "после пина manifest должен примениться: {r2:?}"
+        "after the pin the manifest must apply: {r2:?}"
     );
     assert!(sb.get_membership_manifest(&vid, 1).unwrap().is_some());
 }
@@ -282,7 +282,7 @@ fn applying_manifest_arms_epoch_floor() {
     assert_eq!(
         sb.get_vault_epoch_floor(&vid).unwrap(),
         Some(1),
-        "пол эпохи должен подняться до применённой эпохи manifest"
+        "the epoch floor must rise to the applied manifest epoch"
     );
 }
 
@@ -312,7 +312,7 @@ fn pinned_vault_rejects_out_of_chain_record() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::AuthorityFailed)),
-        "запись пиненного волта без цепочки должна быть AuthorityFailed: {r:?}"
+        "a pinned vault's record without a chain must be AuthorityFailed: {r:?}"
     );
     assert!(sb.get_vault(&vid).unwrap().is_none());
 }
@@ -351,7 +351,7 @@ fn manifest_below_epoch_floor_rejected() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::EpochBelowFloor)),
-        "manifest ниже пола не отвергнут как EpochBelowFloor: {:?}",
+        "manifest below the floor not rejected as EpochBelowFloor: {:?}",
         r
     );
     assert_eq!(r.applied, 0, "report={:?}", r);
@@ -718,7 +718,7 @@ fn account_state_equal_version_tiebreak_converges() {
     let pb = b"payload-B-different".to_vec();
     let sig_a = sign_account_state(&kb, 5, &pa).unwrap();
     let sig_b = sign_account_state(&kb, 5, &pb).unwrap();
-    assert_ne!(sig_a, sig_b, "разный payload → разная подпись");
+    assert_ne!(sig_a, sig_b, "different payload → different signature");
     let obj_a = AccountStateObject {
         author_pubkey: author.clone(),
         version: 5,
@@ -777,11 +777,11 @@ fn account_state_bad_signature_rejected() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::SignatureFailed)),
-        "форджед-подпись → SignatureFailed: {r:?}"
+        "forged signature → SignatureFailed: {r:?}"
     );
     assert!(
         sb.get_account_state(&author).unwrap().is_none(),
-        "форджед account-state не применяется"
+        "a forged account-state is not applied"
     );
 }
 
@@ -805,7 +805,7 @@ fn account_state_wrong_author_rejected() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::AuthorityFailed)),
-        "чужое account-state должно быть AuthorityFailed: {r:?}"
+        "a foreign account-state must be AuthorityFailed: {r:?}"
     );
     assert!(sb.get_account_state(&genesis(&other)).unwrap().is_none());
 }
@@ -842,7 +842,7 @@ fn account_state_oversized_version_rejected_not_pull_abort() {
         r.rejected
             .iter()
             .any(|x| matches!(x.reason, RejectReason::Malformed)),
-        "раздутая версия должна быть Malformed: {r:?}"
+        "an oversized version must be Malformed: {r:?}"
     );
     // the valid v1 is applied (the pull continued after the reject).
     assert_eq!(sb.get_account_state(&author).unwrap().unwrap().version, 1);

@@ -1,4 +1,4 @@
-//! Тесты P4: eager VK-ротация, revocation re-wrap, purge_vault, member-aware verify_chain.
+//! P4 tests: eager VK rotation, revocation re-wrap, purge_vault, member-aware verify_chain.
 
 use unissh_keychain::{create_account, KdfParams, UnlockedKeyset};
 use unissh_storage::{ItemRecord, MemberRole, Storage};
@@ -14,7 +14,7 @@ fn storage() -> Storage {
     Storage::open_in_memory(&[7u8; 32]).unwrap()
 }
 
-/// member-id члена = его Ed25519 pubkey; X25519 pub — для обёртки VK.
+/// a member's member-id = their Ed25519 pubkey; X25519 pub is for wrapping the VK.
 fn ed_of(ks: &UnlockedKeyset) -> Vec<u8> {
     ks.signing.verifying.to_bytes().to_vec()
 }
@@ -22,13 +22,13 @@ fn x_of(ks: &UnlockedKeyset) -> Vec<u8> {
     ks.encryption.public.to_bytes().to_vec()
 }
 
-/// Делает из свежесозданного Vault — membership-волт: кладёт genesis manifest@1
-/// над набором `members` в storage. Vault создаёт admin (owner==admin_ed).
-/// VK волта для manifest не нужен — manifest только про членов/роли.
+/// Turns a freshly created Vault into a membership vault: puts a genesis manifest@1
+/// over the `members` set into storage. The Vault is created by admin (owner==admin_ed).
+/// The vault VK is not needed for the manifest — the manifest is only about members/roles.
 #[allow(dead_code)]
 fn put_genesis_manifest(st: &Storage, admin: &UnlockedKeyset, vault_id: &[u8], members: &[Member]) {
     let m = build_manifest(admin, vault_id, 1, members).unwrap();
-    // самопроверка цепочки до персиста (genesis_owner == admin_ed)
+    // self-check the chain before persisting (genesis_owner == admin_ed)
     let admin_ed = ed_of(admin);
     verify_manifest(&m, vault_id, None, &admin_ed).unwrap();
     st.put_membership_manifest(&m).unwrap();
@@ -38,8 +38,8 @@ fn put_genesis_manifest(st: &Storage, admin: &UnlockedKeyset, vault_id: &[u8], m
 fn rotate_vk_reissues_to_remaining_members_only() {
     let st = storage();
     let admin = keyset();
-    let bob = keyset(); // останется
-    let carol = keyset(); // будет отозвана
+    let bob = keyset(); // stays
+    let carol = keyset(); // will be revoked
     let admin_ed = ed_of(&admin);
     let bob_ed = ed_of(&bob);
     let carol_ed = ed_of(&carol);
@@ -47,7 +47,7 @@ fn rotate_vk_reissues_to_remaining_members_only() {
     let v = Vault::create(&st, &admin, b"mv".to_vec(), b"shared").unwrap();
     v.put_item(b"secret", 1, b"top-secret").unwrap();
 
-    // genesis manifest@1 над всеми тремя (carol = Editor)
+    // genesis manifest@1 over all three (carol = Editor)
     put_genesis_manifest(
         &st,
         &admin,
@@ -68,7 +68,7 @@ fn rotate_vk_reissues_to_remaining_members_only() {
         ],
     );
 
-    // Ротация: оставляем admin + bob (carol отозвана). Гранты только оставшимся.
+    // Rotation: keep admin + bob (carol revoked). Grants only to those who remain.
     let remaining = vec![
         Member {
             ed25519_pub: admin_ed.clone(),
@@ -86,14 +86,14 @@ fn rotate_vk_reissues_to_remaining_members_only() {
     let new_epoch = v.rotate_vk(&admin, &remaining, &grants).unwrap();
     assert_eq!(new_epoch, 2);
 
-    // manifest@2 существует и проверяется по цепочке (genesis_owner=admin_ed)
+    // manifest@2 exists and verifies along the chain (genesis_owner=admin_ed)
     let m2 = st
         .get_membership_manifest(v.vault_id(), 2)
         .unwrap()
         .unwrap();
     assert_eq!(m2.key_epoch, 2);
 
-    // bob (оставшийся) открывает свой грант@2 → получает VK'
+    // bob (remaining) opens his grant@2 → obtains VK'
     let gs2 = st.list_membership_grants(v.vault_id(), 2).unwrap();
     let bob_grant = gs2.iter().find(|g| g.member_pubkey == bob_ed).unwrap();
     let vk_prime = open_grant(
@@ -107,13 +107,13 @@ fn rotate_vk_reissues_to_remaining_members_only() {
     .unwrap();
     assert_eq!(vk_prime.expose_bytes().len(), 32);
 
-    // carol (отозванная) НЕ имеет гранта@2
+    // carol (revoked) has NO grant@2
     assert!(gs2.iter().all(|g| g.member_pubkey != carol_ed));
 
-    // пол эпохи поднят до 2
+    // the epoch floor is raised to 2
     assert_eq!(st.get_vault_epoch_floor(v.vault_id()).unwrap().unwrap(), 2);
 
-    // vault-запись несёт key_epoch=2 и version выросла
+    // the vault record carries key_epoch=2 and its version has grown
     let vrec = st.get_vault(v.vault_id()).unwrap().unwrap();
     assert_eq!(vrec.key_epoch, 2);
     assert!(vrec.version >= 2);
@@ -123,7 +123,7 @@ fn rotate_vk_reissues_to_remaining_members_only() {
 fn rotate_vk_by_non_admin_rejected() {
     let st = storage();
     let admin = keyset();
-    let mallory = keyset(); // Editor, не Admin
+    let mallory = keyset(); // Editor, not Admin
     let admin_ed = ed_of(&admin);
     let mallory_ed = ed_of(&mallory);
 
@@ -143,7 +143,7 @@ fn rotate_vk_by_non_admin_rejected() {
             },
         ],
     );
-    // mallory (Editor) пытается ротировать
+    // mallory (Editor) attempts to rotate
     let remaining = vec![Member {
         ed25519_pub: mallory_ed.clone(),
         role: MemberRole::Admin,
@@ -153,7 +153,7 @@ fn rotate_vk_by_non_admin_rejected() {
         v.rotate_vk(&mallory, &remaining, &grants).unwrap_err(),
         VaultError::AuthorityInvalid
     ));
-    // ничего не записано на эпоху 2
+    // nothing written for epoch 2
     assert!(st
         .get_membership_manifest(v.vault_id(), 2)
         .unwrap()
@@ -168,7 +168,7 @@ fn rotate_vk_on_local_vault_without_manifest_rejected() {
     let owner_ed = ed_of(&owner);
     let v = Vault::create(&st, &owner, b"local".to_vec(), b"n").unwrap();
     v.put_item(b"i", 1, b"x").unwrap();
-    // нет manifest → ротация недопустима (D2: local-волты не меняются)
+    // no manifest → rotation is not allowed (D2: local vaults don't change)
     let remaining = vec![Member {
         ed25519_pub: owner_ed.clone(),
         role: MemberRole::Admin,
@@ -178,7 +178,7 @@ fn rotate_vk_on_local_vault_without_manifest_rejected() {
         v.rotate_vk(&owner, &remaining, &grants).unwrap_err(),
         VaultError::NotAMember
     ));
-    // local item читается как раньше
+    // the local item reads as before
     assert_eq!(v.get_item(b"i").unwrap().unwrap().content.as_slice(), b"x");
 }
 
@@ -224,7 +224,7 @@ fn rotated_item_decrypts_under_new_vk_for_remaining_member() {
     ];
     v.rotate_vk(&admin, &remaining, &grants).unwrap();
 
-    // bob получает VK' из своего гранта@2
+    // bob obtains VK' from his grant@2
     let gs2 = st.list_membership_grants(v.vault_id(), 2).unwrap();
     let bob_grant = gs2.iter().find(|g| g.member_pubkey == bob_ed).unwrap();
     let vk_prime = open_grant(
@@ -237,11 +237,11 @@ fn rotated_item_decrypts_under_new_vk_for_remaining_member() {
     )
     .unwrap();
 
-    // читает re-wrapped item: storage-запись несёт key_epoch=2, version=2
+    // reads the re-wrapped item: the storage record carries key_epoch=2, version=2
     let rec = st.get_item(v.vault_id(), b"secret").unwrap().unwrap();
     assert_eq!(rec.key_epoch, 2);
     assert_eq!(rec.version, 2);
-    // per-item ключ разворачивается VK' (AAD=item_id), контент — под версионным AAD
+    // the per-item key unwraps under VK' (AAD=item_id), content under the versioned AAD
     let item_key = unwrap_key(&vk_prime, &rec.wrapped_item_key, b"secret").unwrap();
     let aad = unissh_crypto::AssociatedData::new(v.vault_id().to_vec(), b"secret".to_vec(), 2);
     let pt = aead_decrypt(&item_key, &rec.content_blob, &aad).unwrap();
@@ -255,7 +255,7 @@ fn rotated_item_key_not_unwrappable_with_old_vk() {
     let admin_ed = ed_of(&admin);
     let v = Vault::create(&st, &admin, b"mv".to_vec(), b"shared").unwrap();
     v.put_item(b"secret", 1, b"data").unwrap();
-    // сохраним СТАРЫЙ wrapped_item_key до ротации
+    // save the OLD wrapped_item_key before rotation
     let old_rec = st.get_item(v.vault_id(), b"secret").unwrap().unwrap();
     let old_wik = old_rec.wrapped_item_key.clone();
 
@@ -279,25 +279,25 @@ fn rotated_item_key_not_unwrappable_with_old_vk() {
     .unwrap();
 
     let new_rec = st.get_item(v.vault_id(), b"secret").unwrap().unwrap();
-    // обёртка ключа изменилась (под VK'). Прямую проверку «старый VK не открывает»
-    // даёт rotated_item_decrypts_under_new_vk_for_remaining_member (VK' тестам
-    // напрямую не виден — граница ядро↔UI).
+    // the key wrap changed (under VK'). The direct "old VK doesn't open" check is
+    // provided by rotated_item_decrypts_under_new_vk_for_remaining_member (VK' is not
+    // directly visible to tests — the core↔UI boundary).
     assert_ne!(new_rec.wrapped_item_key, old_wik);
 }
 
 #[test]
 fn rotate_vk_is_atomic_on_midway_failure() {
-    // Атомарность: сбой ПОСРЕДИ транзакции (после записи manifest@2, грантов@2 и
-    // re-wrapped item, на шаге put_vault) обязан откатить ВСЮ ротацию — никакого
-    // полу-ротированного состояния. Версии в `rotate_vk` монотонно выводятся из
-    // свежих чтений, поэтому version-конфликт недостижим; вместо этого
-    // детерминированно ломаем put_vault через `checked_version`: stored
-    // vault-version = i64::MAX → ротация считает v_version = i64::MAX+1, которую
-    // storage отвергает (VersionOutOfRange) уже ВНУТРИ транзакции — после
-    // manifest/grant/item. Порядок put в транзакции: manifest → гранты → items →
-    // vault → floor (см. Vault::rotate_vk). `rotate_vk` не расшифровывает старый
-    // name_blob (берёт self.name из памяти и пере-шифрует под VK'/новую версию),
-    // поэтому подмена stored vault-version не ломает его чтения.
+    // Atomicity: a failure MID-transaction (after writing manifest@2, grants@2, and
+    // the re-wrapped item, at the put_vault step) must roll back the ENTIRE rotation —
+    // no half-rotated state. Versions in `rotate_vk` are derived monotonically from
+    // fresh reads, so a version conflict is unreachable; instead we deterministically
+    // break put_vault via `checked_version`: stored vault-version = i64::MAX → rotation
+    // computes v_version = i64::MAX+1, which storage rejects (VersionOutOfRange) already
+    // INSIDE the transaction — after manifest/grant/item. The put order in the
+    // transaction: manifest → grants → items → vault → floor (see Vault::rotate_vk).
+    // `rotate_vk` does not decrypt the old name_blob (it takes self.name from memory and
+    // re-encrypts under VK'/the new version), so swapping the stored vault-version does
+    // not break its reads.
     let st = storage();
     let admin = keyset();
     let admin_ed = ed_of(&admin);
@@ -313,7 +313,7 @@ fn rotate_vk_is_atomic_on_midway_failure() {
         }],
     );
 
-    // Подкладываем vault-запись на версии i64::MAX (storage не верит подписи).
+    // Inject a vault record at version i64::MAX (storage does not trust the signature).
     let mut bumped = st.get_vault(v.vault_id()).unwrap().unwrap();
     bumped.version = i64::MAX as u64;
     st.put_vault(&bumped).unwrap();
@@ -330,9 +330,10 @@ fn rotate_vk_is_atomic_on_midway_failure() {
         .unwrap_err();
     assert!(matches!(err, VaultError::Storage(_)), "actual err: {err:?}");
 
-    // Откат полный: re-wrapped item НЕ записан (остался на version=1, epoch=0),
-    // manifest@2 / пол эпохи / гранты@2 отсутствуют. Главное: ничего из эпохи 2 не
-    // закоммичено (manifest@2 и грант@2 писались в транзакции до упавшего put_vault).
+    // Full rollback: the re-wrapped item is NOT written (it stays at version=1, epoch=0),
+    // manifest@2 / epoch floor / grants@2 are absent. The key point: nothing from epoch 2
+    // is committed (manifest@2 and grant@2 were written in the transaction before the
+    // failed put_vault).
     let it = st.get_item(v.vault_id(), b"secret").unwrap().unwrap();
     assert_eq!(it.version, 1);
     assert_eq!(it.key_epoch, 0);
@@ -355,7 +356,7 @@ fn purge_vault_leaves_no_rows() {
     let v = Vault::create(&st, &admin, b"mv".to_vec(), b"shared").unwrap();
     v.put_item(b"a", 1, b"x").unwrap();
     v.put_item_keep_history(b"pw", 4, b"s1").unwrap();
-    v.put_item_keep_history(b"pw", 4, b"s2").unwrap(); // создаёт историю
+    v.put_item_keep_history(b"pw", 4, b"s2").unwrap(); // creates history
     put_genesis_manifest(
         &st,
         &admin,
@@ -368,11 +369,11 @@ fn purge_vault_leaves_no_rows() {
     st.set_vault_epoch_floor(v.vault_id(), 1).unwrap();
     let vid = v.vault_id().to_vec();
 
-    // соседний волт — не трогать
+    // a neighboring vault — do not touch
     let other = Vault::create(&st, &admin, b"other".to_vec(), b"o").unwrap();
     other.put_item(b"keep", 1, b"y").unwrap();
 
-    // purge поглощает self (zeroize VK) и стирает все строки
+    // purge consumes self (zeroize VK) and erases all rows
     v.purge_vault().unwrap();
 
     assert!(st.get_vault(&vid).unwrap().is_none());
@@ -381,7 +382,7 @@ fn purge_vault_leaves_no_rows() {
     assert!(st.get_membership_manifest(&vid, 1).unwrap().is_none());
     assert!(st.list_membership_grants(&vid, 1).unwrap().is_empty());
     assert!(st.get_vault_epoch_floor(&vid).unwrap().is_none());
-    // соседний волт цел
+    // the neighboring vault is intact
     assert!(st.get_vault(other.vault_id()).unwrap().is_some());
     assert_eq!(st.list_items(other.vault_id()).unwrap().len(), 1);
 }
@@ -412,9 +413,9 @@ fn purge_vault_after_rotation_clears_all_epochs() {
     )
     .unwrap();
     let vid = v.vault_id().to_vec();
-    // переоткрыть под VK' не нужно для purge — purge не разворачивает VK
+    // reopening under VK' is not needed for purge — purge doesn't unwrap the VK
     v.purge_vault().unwrap();
-    // обе эпохи манифестов/грантов стёрты
+    // both epochs of manifests/grants are erased
     assert!(st.get_membership_manifest(&vid, 1).unwrap().is_none());
     assert!(st.get_membership_manifest(&vid, 2).unwrap().is_none());
     assert!(st.list_membership_grants(&vid, 1).unwrap().is_empty());
@@ -448,27 +449,27 @@ fn verify_chain_ok_after_rotation() {
     )
     .unwrap();
 
-    // verify_chain на том же инстансе (его genesis_owner = admin = author всех записей)
+    // verify_chain on the same instance (its genesis_owner = admin = author of all records)
     let report = v.verify_chain().unwrap();
     assert!(report.ok, "issues: {:?}", report.issues);
 }
 
 #[test]
 fn rotate_vk_rejects_omitting_owner_from_remaining_members() {
-    // P4-ревью (hardening): re-wrapped items и новую vault-запись авторствует
-    // владелец (self.keyset == genesis_owner). Если админ != владелец опускает
-    // владельца из remaining_members, эти записи на new_epoch — от не-члена и
-    // позже отвергнутся verify_record_authority. rotate_vk обязан отвергнуть
-    // такую ротацию ДО записей. Контроль: с владельцем в наборе — ротация ок.
+    // P4 review (hardening): the re-wrapped items and the new vault record are authored
+    // by the owner (self.keyset == genesis_owner). If an admin != owner omits the owner
+    // from remaining_members, those records at new_epoch are from a non-member and will
+    // later be rejected by verify_record_authority. rotate_vk must reject such a rotation
+    // BEFORE writing. Control: with the owner in the set — rotation is ok.
     let st = storage();
-    let owner = keyset(); // создатель волта = genesis_owner
-    let admin2 = keyset(); // второй админ, != владелец
+    let owner = keyset(); // vault creator = genesis_owner
+    let admin2 = keyset(); // second admin, != owner
     let owner_ed = ed_of(&owner);
     let admin2_ed = ed_of(&admin2);
 
     let v = Vault::create(&st, &owner, b"mv".to_vec(), b"shared").unwrap();
     v.put_item(b"secret", 1, b"top").unwrap();
-    // genesis@1: владелец Admin + admin2 Admin.
+    // genesis@1: owner Admin + admin2 Admin.
     put_genesis_manifest(
         &st,
         &owner,
@@ -485,7 +486,7 @@ fn rotate_vk_rejects_omitting_owner_from_remaining_members() {
         ],
     );
 
-    // admin2 ротирует, ОПУСКАЯ владельца из remaining_members → отказ.
+    // admin2 rotates, OMITTING the owner from remaining_members → rejected.
     let err = v
         .rotate_vk(
             &admin2,
@@ -497,14 +498,14 @@ fn rotate_vk_rejects_omitting_owner_from_remaining_members() {
         )
         .unwrap_err();
     assert!(matches!(err, VaultError::NotAMember), "got {err:?}");
-    // ничего не закоммичено: эпоха 2 отсутствует, пол не выставлен.
+    // nothing committed: epoch 2 is absent, the floor is not set.
     assert!(st
         .get_membership_manifest(v.vault_id(), 2)
         .unwrap()
         .is_none());
     assert!(st.get_vault_epoch_floor(v.vault_id()).unwrap().is_none());
 
-    // Контроль: admin2 включает владельца → ротация проходит.
+    // Control: admin2 includes the owner → rotation passes.
     v.rotate_vk(
         &admin2,
         &[
@@ -528,9 +529,9 @@ fn rotate_vk_rejects_omitting_owner_from_remaining_members() {
 
 #[test]
 fn verify_chain_flags_record_below_epoch_floor() {
-    // После ротации (пол=2) злонамеренно инъектируем запись item на эпохе 1
-    // (manifest@1 ещё в storage, но эпоха ниже пола). verify_chain обязан
-    // пометить её как NotAuthorized (anti-rollback, §1.1).
+    // After rotation (floor=2) we maliciously inject an item record at epoch 1
+    // (manifest@1 is still in storage, but the epoch is below the floor). verify_chain
+    // must flag it as NotAuthorized (anti-rollback, §1.1).
     let st = storage();
     let admin = keyset();
     let admin_ed = ed_of(&admin);
@@ -554,7 +555,7 @@ fn verify_chain_flags_record_below_epoch_floor() {
         &[(x_of(&admin), admin_ed.clone(), MemberRole::Admin)],
     )
     .unwrap();
-    // после ротации item "a" на эпохе 2, пол=2. Инъектируем НОВЫЙ item на эпохе 1.
+    // after rotation item "a" is at epoch 2, floor=2. Inject a NEW item at epoch 1.
     use unissh_crypto::{
         aead_encrypt, sign_version, wrap_key, AssociatedData, SymmetricKey, VersionedObject,
     };
@@ -575,7 +576,7 @@ fn verify_chain_flags_record_below_epoch_floor() {
         author_pubkey: admin_ed.clone(),
         created_at: 0,
         updated_at: 0,
-        key_epoch: 1, // ниже пола (2)
+        key_epoch: 1, // below the floor (2)
     };
     st.put_item(&injected).unwrap();
 
@@ -589,12 +590,12 @@ fn verify_chain_flags_record_below_epoch_floor() {
 
 #[test]
 fn verify_chain_flags_record_with_epoch_having_no_manifest() {
-    // АНТИ-ROLLBACK BYPASS (high): post-rotation злоумышленник из untrusted-DB
-    // ставит ВАЛИДНО-owner-подписанной записи key_epoch=0 (эпоха БЕЗ manifest).
-    // До фикса режим вычислялся ПО-ЗАПИСНО из её же key_epoch: нет manifest@0 →
-    // downgrade на owner==author → запись принималась (floor/D1 пропускались).
-    // Фикс: режим берётся из vault-level доверенного сигнала; в membership-режиме
-    // запись на эпохе без manifest → NotAuthorized.
+    // ANTI-ROLLBACK BYPASS (high): post-rotation an attacker from an untrusted DB
+    // stamps key_epoch=0 (an epoch WITHOUT a manifest) onto a VALIDLY-owner-signed
+    // record. Before the fix the mode was computed PER-RECORD from its own key_epoch:
+    // no manifest@0 → downgrade to owner==author → the record was accepted (floor/D1
+    // were skipped). The fix: the mode is taken from a vault-level trusted signal; in
+    // membership mode a record at an epoch without a manifest → NotAuthorized.
     let st = storage();
     let admin = keyset();
     let admin_ed = ed_of(&admin);
@@ -618,7 +619,7 @@ fn verify_chain_flags_record_with_epoch_having_no_manifest() {
         &[(x_of(&admin), admin_ed.clone(), MemberRole::Admin)],
     )
     .unwrap();
-    // Инъекция: запись на key_epoch=0 (НЕТ manifest@0), подписана owner (валидно).
+    // Injection: a record at key_epoch=0 (NO manifest@0), signed by owner (validly).
     use unissh_crypto::{
         aead_encrypt, sign_version, wrap_key, AssociatedData, SymmetricKey, VersionedObject,
     };
@@ -639,7 +640,7 @@ fn verify_chain_flags_record_with_epoch_having_no_manifest() {
         author_pubkey: admin_ed.clone(),
         created_at: 0,
         updated_at: 0,
-        key_epoch: 0, // эпоха БЕЗ manifest — даунгрейд режима
+        key_epoch: 0, // an epoch WITHOUT a manifest — mode downgrade
     };
     st.put_item(&injected).unwrap();
 
@@ -653,12 +654,12 @@ fn verify_chain_flags_record_with_epoch_having_no_manifest() {
 
 #[test]
 fn get_item_refuses_downgraded_epoch_record() {
-    // Тот же даунгрейд на ЖИВОМ read-пути (decrypt_record): после ротации (пол=2)
-    // untrusted-DB кладёт ВАЛИДНО-owner-подписанную запись на key_epoch=0 (эпоха
-    // БЕЗ manifest). До фикса decrypt_record выбирал режим по record.key_epoch:
-    // нет manifest@0 → owner==author проходил → дальше unwrap_key/decrypt.
-    // Авторитет ОБЯЗАН отказать ПЕРЕД разворотом ключа (VaultError != Decrypt),
-    // иначе даунгрейд-режим принят. Это и есть «empirically reproduced» read-путь.
+    // The same downgrade on the LIVE read path (decrypt_record): after rotation (floor=2)
+    // an untrusted DB puts a VALIDLY-owner-signed record at key_epoch=0 (an epoch
+    // WITHOUT a manifest). Before the fix decrypt_record chose the mode by
+    // record.key_epoch: no manifest@0 → owner==author passed → on to unwrap_key/decrypt.
+    // Authority MUST reject BEFORE unwrapping the key (VaultError != Decrypt), otherwise
+    // the downgrade mode is accepted. This is the "empirically reproduced" read path.
     let st = storage();
     let admin = keyset();
     let admin_ed = ed_of(&admin);
@@ -682,10 +683,10 @@ fn get_item_refuses_downgraded_epoch_record() {
         &[(x_of(&admin), admin_ed.clone(), MemberRole::Admin)],
     )
     .unwrap();
-    // переоткрываем волт владельцем: vault-запись@2 запечатывает VK' под его pubkey.
+    // reopen the vault as owner: vault record@2 seals VK' under his pubkey.
     let v2 = Vault::open(&st, &admin, v.vault_id()).unwrap();
 
-    // Инъекция: новая запись на key_epoch=0, валидно подписана owner.
+    // Injection: a new record at key_epoch=0, validly signed by owner.
     use unissh_crypto::{
         aead_encrypt, sign_version, wrap_key, AssociatedData, SymmetricKey, VersionedObject,
     };
@@ -706,11 +707,11 @@ fn get_item_refuses_downgraded_epoch_record() {
         author_pubkey: admin_ed.clone(),
         created_at: 0,
         updated_at: 0,
-        key_epoch: 0, // эпоха БЕЗ manifest — даунгрейд режима
+        key_epoch: 0, // an epoch WITHOUT a manifest — mode downgrade
     };
     st.put_item(&injected).unwrap();
 
-    // Живой read-путь обязан отказать ПО АВТОРИТЕТУ, не дойдя до unwrap/decrypt.
+    // The live read path must reject ON AUTHORITY, before reaching unwrap/decrypt.
     let err = v2.get_item(b"injected").unwrap_err();
     assert!(
         !matches!(err, VaultError::Decrypt),
@@ -720,8 +721,8 @@ fn get_item_refuses_downgraded_epoch_record() {
 
 #[test]
 fn verify_chain_rejects_self_consistent_old_epoch_record() {
-    // Сервер после ротации отдаёт запись, чей author — НЕ член проверенной
-    // цепочки на её эпоху. verify_chain ловит это.
+    // After rotation the server serves a record whose author is NOT a member of the
+    // verified chain at its epoch. verify_chain catches this.
     let st = storage();
     let admin = keyset();
     let attacker = keyset();
@@ -747,7 +748,7 @@ fn verify_chain_rejects_self_consistent_old_epoch_record() {
         &[(x_of(&admin), admin_ed.clone(), MemberRole::Admin)],
     )
     .unwrap();
-    // attacker инъектирует запись на эпохе 2, подписанную собой (не член@2).
+    // attacker injects a record at epoch 2, signed by themselves (not a member@2).
     use unissh_crypto::{
         aead_encrypt, sign_version, wrap_key, AssociatedData, SymmetricKey, VersionedObject,
     };
@@ -768,7 +769,7 @@ fn verify_chain_rejects_self_consistent_old_epoch_record() {
         author_pubkey: attacker_ed.clone(),
         created_at: 0,
         updated_at: 0,
-        key_epoch: 2, // на эпохе 2 attacker НЕ член
+        key_epoch: 2, // at epoch 2 the attacker is NOT a member
     };
     st.put_item(&evil).unwrap();
     let report = v.verify_chain().unwrap();

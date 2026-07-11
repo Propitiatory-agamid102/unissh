@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL
 );
--- ⏳ seam под CA-оркестратор (ТЗ §15): метаданные сертификата, без CRUD-логики сейчас.
+-- ⏳ seam for the CA orchestrator (spec §15): certificate metadata, without CRUD logic for now.
 CREATE TABLE IF NOT EXISTS cert_meta (
     vault_id   BLOB NOT NULL,
     item_id    BLOB NOT NULL,
@@ -204,16 +204,16 @@ CREATE TABLE IF NOT EXISTS account_state (
 );
 "#;
 
-/// DDL версии 9: per-object dirty-флаг синка. До этого `sync_push` пере-отдавал ВСЕ
-/// объекты привязанных cloud-волтов на КАЖДОМ синке (сервер дедупил по version-LWW,
-/// но шифротекст заново заливался при каждом запуске). `dirty=1` ставит слой `vault`
-/// при ЛОКАЛЬНОЙ правке; `sync_push` шлёт только `dirty=1` и снимает флаг после
-/// успешного пуша; `sync_pull` пишет через низкоуровневый `put_*` (не через `vault`),
-/// поэтому применённое с сервера остаётся `dirty=0` и не уходит обратно. Существующие
-/// строки помечаем `dirty=1` разово — чтобы локальные, но ещё-не-запушенные данные
-/// не осели незасинканными; после первого пуша флаг снимется. account_state НЕ
-/// покрывается флагом (он броадкастится на КАЖДЫЙ сервер) — его dirty-трекинг ведёт
-/// per-tenant version-курсор в `sync_state`.
+/// Version 9 DDL: per-object sync dirty flag. Before this, `sync_push` re-sent ALL
+/// objects of bound cloud vaults on EVERY sync (the server deduplicated by version-LWW,
+/// but the ciphertext was re-uploaded on each run). `dirty=1` is set by the `vault` layer
+/// on a LOCAL edit; `sync_push` sends only `dirty=1` and clears the flag after
+/// a successful push; `sync_pull` writes via the low-level `put_*` (not via `vault`),
+/// so what is applied from the server stays `dirty=0` and does not go back. Existing
+/// rows are marked `dirty=1` once — so that local, but not-yet-pushed data
+/// does not settle unsynced; after the first push the flag is cleared. account_state is NOT
+/// covered by the flag (it is broadcast to EVERY server) — its dirty-tracking is done by a
+/// per-tenant version cursor in `sync_state`.
 const MIGRATION_V9: &str = r#"
 ALTER TABLE vaults ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE items ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0;
@@ -226,13 +226,13 @@ UPDATE membership_grants SET dirty = 1;
 CREATE INDEX IF NOT EXISTS idx_items_dirty ON items (vault_id, dirty);
 "#;
 
-/// Применяет миграции до [`SCHEMA_VERSION`].
+/// Applies migrations up to [`SCHEMA_VERSION`].
 ///
-/// Каждый шаг атомарен: DDL версии и bump `user_version` идут в одной транзакции
-/// (DDL в SQLite транзакционен). Краш/сбой посреди шага → откат целиком,
-/// `user_version` не меняется, повторный `open()` безопасно прогоняет шаг заново.
-/// Без этого не-идемпотентный `ALTER TABLE ADD COLUMN` (V2) после частичного
-/// применения навсегда ломал бы открытие БД.
+/// Each step is atomic: the version's DDL and the `user_version` bump run in one transaction
+/// (DDL in SQLite is transactional). A crash/failure mid-step → full rollback,
+/// `user_version` is unchanged, and a repeat `open()` safely re-runs the step.
+/// Without this, a non-idempotent `ALTER TABLE ADD COLUMN` (V2) after a partial
+/// application would forever break opening the DB.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StorageError> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current > SCHEMA_VERSION {
@@ -268,8 +268,8 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Прогоняет один шаг миграции и фиксирует `user_version` атомарно. При ошибке —
-/// явный `ROLLBACK`, чтобы соединение не осталось в открытой транзакции.
+/// Runs one migration step and commits `user_version` atomically. On error, an
+/// explicit `ROLLBACK`, so the connection is not left in an open transaction.
 fn run_step(conn: &Connection, ddl: &str, version: i64) -> Result<(), StorageError> {
     let batch = format!("BEGIN;\n{ddl}\nPRAGMA user_version = {version};\nCOMMIT;");
     conn.execute_batch(&batch).map_err(|e| {

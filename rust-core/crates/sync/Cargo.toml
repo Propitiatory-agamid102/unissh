@@ -1,7 +1,7 @@
 [package]
 name = "unissh-sync"
 version = "0.1.0"
-description = "Клиентский sync-движок UniSSH: pull/push/дельта, verify-before-apply, signed-version LWW, surfacing конфликтов, anti-rollback курсор (server-tz §3/§9/§1.1). Транспорт недоверенный; реальной сети/сервера в этом крейте нет."
+description = "UniSSH client sync engine: pull/push/delta, verify-before-apply, signed-version LWW, surfacing conflicts, anti-rollback cursor (server-tz §3/§9/§1.1). The transport is untrusted; there is no real network/server in this crate."
 readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true

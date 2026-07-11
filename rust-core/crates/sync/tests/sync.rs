@@ -519,6 +519,6 @@ fn sync_push_emits_local_account_state() {
         pushed
             .iter()
             .any(|(_, o)| matches!(o, SyncObject::AccountState(a) if a.version == 7)),
-        "sync_push должен отдать локальное account-state"
+        "sync_push must hand off the local account-state"
     );
 }

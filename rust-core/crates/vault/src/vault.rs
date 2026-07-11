@@ -169,7 +169,7 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// Открывает существующий локальный волт: разворачивает VK, проверяет подпись.
+    /// Opens an existing local vault: unwraps the VK, verifies the signature.
     pub fn open(
         storage: &'a Storage,
         keyset: &'a UnlockedKeyset,
@@ -181,11 +181,11 @@ impl<'a> Vault<'a> {
         }
         verify_vault_record(&record)?;
 
-        // Owner-обёртка привязана к (vault_id, owner_ed, key_epoch записи); тот же
-        // info, что при seal. Открывает только владелец (члены идут через open_grant).
+        // The owner wrapping is bound to (vault_id, owner_ed, the record's key_epoch); the same
+        // info as at seal time. Only the owner opens it (members go through open_grant).
         let owner_ed = keyset.signing.verifying.to_bytes();
-        // read-fallback: текущая привязка info, при провале — pre-round-2 (сырой
-        // vault_id). Открывает только владелец (члены идут через open_grant).
+        // read-fallback: the current info binding, on failure — pre-round-2 (raw
+        // vault_id). Only the owner opens it (members go through open_grant).
         let vk = open_owner_vk(
             &keyset.encryption.secret,
             &record.wrapped_vk,
@@ -199,11 +199,11 @@ impl<'a> Vault<'a> {
             &name_aad(&record.vault_id, record.version),
         )?;
 
-        // Эпоха для штамповки новых записей: эпоха vault-записи, но в
-        // membership-режиме — не ниже текущей (latest manifest), чтобы свежий
-        // put_item не писался на устаревшую эпоху ниже пола (→ EpochInvalid).
-        // record.key_epoch ре-якорится establish/rotate, но узлы синка могли
-        // получить более новый manifest, чем переподписанную vault-запись.
+        // The epoch for stamping new records: the vault record's epoch, but in
+        // membership mode — not below the current one (latest manifest), so that a fresh
+        // put_item is not written at a stale epoch below the floor (→ EpochInvalid).
+        // record.key_epoch is re-anchored by establish/rotate, but sync nodes may have
+        // received a newer manifest than the re-signed vault record.
         let key_epoch = match storage.latest_membership_epoch(&record.vault_id)? {
             Some(latest) => record.key_epoch.max(latest),
             None => record.key_epoch,
@@ -220,7 +220,7 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// Удаляет волт (tombstone с возросшей версией).
+    /// Deletes the vault (tombstone with a bumped version).
     pub fn delete(self) -> Result<(), VaultError> {
         let version = self.version + 1;
         let name_blob = aead_encrypt(
@@ -228,8 +228,8 @@ impl<'a> Vault<'a> {
             self.name.as_slice(),
             &name_aad(&self.vault_id, version),
         )?;
-        // Сохраняем актуальную эпоху/target/policy: tombstone membership-волта не
-        // должен деградировать на эпоху 0 (downgrade → нечитаемая запись).
+        // Preserve the current epoch/target/policy: a membership vault's tombstone must
+        // not degrade to epoch 0 (downgrade → an unreadable record).
         let cur = self
             .storage
             .get_vault(&self.vault_id)?
@@ -253,8 +253,8 @@ impl<'a> Vault<'a> {
             cur.cache_policy,
             cur.sync_tenant.clone(),
         )?;
-        // Атомарно: tombstone волта + очистка истории версий всех его items —
-        // архивные VK-шифрованные версии секретов не должны переживать удаление.
+        // Atomically: the vault tombstone + clearing the version history of all its items —
+        // archived VK-encrypted versions of secrets must not survive deletion.
         self.storage.transaction(|| {
             self.storage.put_vault(&record)?;
             self.storage.mark_vault_dirty(&self.vault_id)?; // tombstone → needs push
@@ -269,41 +269,41 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// **Кооперативный hard-delete волта** (`purge`, server-tz §6.4) по проверенному
-    /// revoke-сигналу: физически удаляет vault-запись, ВСЕ items (вкл. tombstones),
-    /// ВСЮ историю версий, ВСЕ membership-манифесты и гранты и пол эпохи волта
-    /// (атомарно, через [`Storage::purge_vault_data`]), и **зануляет in-memory VK**
-    /// (поглощает `self` → `Drop` зануляет `vk`).
+    /// **Cooperative hard-delete of a vault** (`purge`, server-tz §6.4) on a verified
+    /// revoke signal: physically removes the vault record, ALL items (incl. tombstones),
+    /// the ENTIRE version history, ALL membership manifests and grants, and the vault's epoch floor
+    /// (atomically, via [`Storage::purge_vault_data`]), and **zeroizes the in-memory VK**
+    /// (consumes `self` → `Drop` zeroizes `vk`).
     ///
-    /// В отличие от [`Vault::delete`] (tombstone — логическое удаление с ростом
-    /// версии, переживающее синк), `purge_vault` не оставляет на устройстве ни
-    /// шифротекста, ни метаданных волта.
+    /// Unlike [`Vault::delete`] (tombstone — a logical deletion with a bumped
+    /// version, surviving sync), `purge_vault` leaves neither
+    /// ciphertext nor vault metadata on the device.
     ///
-    /// **Best-effort/гигиена, НЕ remote-wipe:** данные, уже синкнутые на ДРУГИЕ или
-    /// модифицированные клиенты, этим не отзываются (энфорс кооперативен). Жёсткий
-    /// криптографический отзыв доступа даёт [`Vault::rotate_vk`] (ротация VK).
+    /// **Best-effort/hygiene, NOT a remote-wipe:** data already synced to OTHER or
+    /// modified clients is not revoked by this (enforcement is cooperative). Hard
+    /// cryptographic revocation of access is provided by [`Vault::rotate_vk`] (VK rotation).
     pub fn purge_vault(self) -> Result<(), VaultError> {
         self.storage.purge_vault_data(&self.vault_id)?;
-        // self (с vk: SymmetricKey + name: Zeroizing) уходит из области видимости →
-        // ZeroizeOnDrop зануляет VK. Явный drop для наглядности.
+        // self (with vk: SymmetricKey + name: Zeroizing) goes out of scope →
+        // ZeroizeOnDrop zeroizes the VK. Explicit drop for clarity.
         drop(self);
         Ok(())
     }
 
-    /// Идентификатор волта.
+    /// The vault identifier.
     pub fn vault_id(&self) -> &[u8] {
         &self.vault_id
     }
 
-    /// Расшифрованное имя волта.
+    /// The decrypted vault name.
     pub fn name(&self) -> &[u8] {
         self.name.as_slice()
     }
 
-    /// Переименовывает волт: пере-шифровывает имя под VK с возросшей версией и
-    /// переподписывает запись. Сохраняет актуальную `key_epoch`/`sync_target`/
-    /// `cache_policy` записи (иначе membership-волт деградировал бы на эпоху 0 →
-    /// нечитаемая vault-запись, как и items до фикса).
+    /// Renames the vault: re-encrypts the name under the VK with a bumped version and
+    /// re-signs the record. Preserves the record's current `key_epoch`/`sync_target`/
+    /// `cache_policy` (otherwise a membership vault would degrade to epoch 0 →
+    /// an unreadable vault record, as items did before the fix).
     pub fn set_name(&mut self, new_name: &[u8]) -> Result<(), VaultError> {
         let version = self.version + 1;
         let name_blob = aead_encrypt(&self.vk, new_name, &name_aad(&self.vault_id, version))?;
@@ -339,8 +339,8 @@ impl<'a> Vault<'a> {
 
     // --- items ---
 
-    /// Кладёт (создаёт/обновляет) item: генерирует per-item ключ, обёртывает его
-    /// VK, шифрует контент с привязкой, подписывает версию. Возвращает версию.
+    /// Puts (creates/updates) an item: generates a per-item key, wraps it under the
+    /// VK, encrypts the content with binding, signs the version. Returns the version.
     pub fn put_item(
         &self,
         item_id: impl AsRef<[u8]>,
@@ -370,11 +370,11 @@ impl<'a> Vault<'a> {
             tombstone: false,
             signature,
             author_pubkey: self.keyset.signing.verifying.to_bytes().to_vec(),
-            // Временные метки проставляет storage при записи.
+            // Timestamps are set by storage on write.
             created_at: 0,
             updated_at: 0,
-            // Актуальная эпоха ключа волта (НЕ 0): в membership-режиме запись на
-            // эпохе без manifest / ниже пола отвергается verify_record_authority.
+            // The vault key's current epoch (NOT 0): in membership mode a record at
+            // an epoch without a manifest / below the floor is rejected by verify_record_authority.
             key_epoch: self.key_epoch.get(),
         };
         self.storage.put_item(&record)?;
@@ -382,7 +382,7 @@ impl<'a> Vault<'a> {
         Ok(version)
     }
 
-    /// Возвращает расшифрованный item (проверяя подпись). `None`, если нет или удалён.
+    /// Returns the decrypted item (verifying the signature). `None` if absent or deleted.
     pub fn get_item(&self, item_id: &[u8]) -> Result<Option<DecryptedItem>, VaultError> {
         match self.storage.get_item(&self.vault_id, item_id)? {
             Some(r) if !r.tombstone => Ok(Some(self.decrypt_record(&r)?)),
@@ -390,29 +390,29 @@ impl<'a> Vault<'a> {
         }
     }
 
-    /// Проверяет подпись записи и расшифровывает её контент (общий путь для
-    /// текущей версии и исторических).
+    /// Verifies the record's signature and decrypts its content (the shared path for
+    /// the current version and historical ones).
     fn decrypt_record(&self, record: &ItemRecord) -> Result<DecryptedItem, VaultError> {
         let author = Ed25519VerifyingKey::from_bytes(&record.author_pubkey)
             .map_err(|_| VaultError::Format)?;
         let aad = item_aad(&self.vault_id, &record.item_id, record.version);
         let vo = VersionedObject::from_content(aad.clone(), &record.content_blob);
-        // Локально откат версии исключён монотонностью storage (anti-rollback на
-        // записи). TODO(Веха 2, синк): использовать crypto::verify_no_rollback
-        // против доверенного last-seen-курсора (вне реплицируемой БД), чтобы
-        // ловить snapshot-replay подменой всего файла БД.
+        // Locally, version rollback is excluded by storage monotonicity (anti-rollback on
+        // write). TODO(Milestone 2, sync): use crypto::verify_no_rollback
+        // against a trusted last-seen cursor (outside the replicated DB), to
+        // catch snapshot-replay by swapping the whole DB file.
         verify_version(&author, &vo, &record.signature)
             .map_err(|_| VaultError::SignatureInvalid)?;
-        // Defense-in-depth: подпись валидна — но валидна ли она под ключом
-        // ВЛАДЕЛЬЦА/ЧЛЕНА? Подменённый author_pubkey даёт самосогласованную
-        // подпись под чужим ключом.
+        // Defense-in-depth: the signature is valid — but is it valid under the
+        // OWNER's/MEMBER's key? A swapped author_pubkey yields a self-consistent
+        // signature under someone else's key.
         //
-        // Режим волта берётся из vault-level сигнала ВНУТРИ
-        // verify_record_authority (membership ⇔ есть пол/manifest), НЕ из
-        // record.key_epoch — иначе untrusted-DB даунгрейдит membership-волт на
-        // owner==author подменой неподписанного key_epoch (P4-ревью, анти-rollback
-        // bypass). В membership-режиме запись на эпохе без manifest / ниже пола /
-        // от не-члена отвергается; в local-режиме — прежняя owner==author сверка.
+        // The vault mode is taken from the vault-level signal INSIDE
+        // verify_record_authority (membership ⇔ there is a floor/manifest), NOT from
+        // record.key_epoch — otherwise an untrusted DB downgrades a membership vault to
+        // owner==author by swapping the unsigned key_epoch (P4 review, anti-rollback
+        // bypass). In membership mode a record at an epoch without a manifest / below the floor /
+        // from a non-member is rejected; in local mode — the former owner==author check.
         let genesis_owner = self.keyset.signing.verifying.to_bytes();
         verify_record_authority(
             self.storage,
@@ -422,7 +422,7 @@ impl<'a> Vault<'a> {
             &genesis_owner,
         )?;
 
-        // read-fallback на pre-round-2 item-обёртку/контент (см. *_compat хелперы).
+        // read-fallback to the pre-round-2 item wrapping/content (see the *_compat helpers).
         let item_key = unwrap_key_compat(&self.vk, &record.wrapped_item_key, &record.item_id)?;
         let content = aead_decrypt_compat(&item_key, &record.content_blob, &aad)?;
 
@@ -434,8 +434,8 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// Как [`Vault::put_item`], но архивирует прошлую версию в историю (ретеншн
-    /// [`HISTORY_RETAIN`]). Для секретов с историей версий (пароль/заметка).
+    /// Like [`Vault::put_item`], but archives the previous version into history (retention
+    /// [`HISTORY_RETAIN`]). For secrets with a version history (password/note).
     pub fn put_item_keep_history(
         &self,
         item_id: impl AsRef<[u8]>,
@@ -465,7 +465,7 @@ impl<'a> Vault<'a> {
             author_pubkey: self.keyset.signing.verifying.to_bytes().to_vec(),
             created_at: 0,
             updated_at: 0,
-            // Актуальная эпоха ключа волта (НЕ 0) — см. put_item.
+            // The vault key's current epoch (NOT 0) — see put_item.
             key_epoch: self.key_epoch.get(),
         };
         self.storage.archive_and_put(&record, HISTORY_RETAIN)?;
@@ -474,7 +474,7 @@ impl<'a> Vault<'a> {
         Ok(version)
     }
 
-    /// Версии item, доступные для reveal: текущая (если жива) + архивные.
+    /// The item versions available for reveal: the current one (if live) + archived ones.
     pub fn list_item_versions(&self, item_id: &[u8]) -> Result<Vec<u64>, VaultError> {
         let mut versions = Vec::new();
         if let Some(r) = self.storage.get_item(&self.vault_id, item_id)? {
@@ -488,8 +488,8 @@ impl<'a> Vault<'a> {
         Ok(versions)
     }
 
-    /// Расшифровывает конкретную версию item (текущую или историческую), проверяя
-    /// её подпись под её AAD. `None`, если такой версии нет.
+    /// Decrypts a specific item version (current or historical), verifying
+    /// its signature under its AAD. `None` if there is no such version.
     pub fn get_item_version(
         &self,
         item_id: &[u8],
@@ -508,7 +508,7 @@ impl<'a> Vault<'a> {
         Ok(None)
     }
 
-    /// Метаданные не-удалённых items (без расшифровки контента).
+    /// Metadata of non-deleted items (without decrypting the content).
     pub fn list_items(&self) -> Result<Vec<ItemMeta>, VaultError> {
         Ok(self
             .storage
@@ -524,7 +524,7 @@ impl<'a> Vault<'a> {
             .collect())
     }
 
-    /// Строит подписанную tombstone-запись (пустой контент, версия `version`).
+    /// Builds a signed tombstone record (empty content, version `version`).
     fn tombstone_record(
         &self,
         item_id: &[u8],
@@ -549,15 +549,15 @@ impl<'a> Vault<'a> {
             author_pubkey: self.keyset.signing.verifying.to_bytes().to_vec(),
             created_at: 0,
             updated_at: 0,
-            // Актуальная эпоха ключа волта (НЕ 0) — tombstone тоже проходит
-            // verify_record_authority в membership-режиме.
+            // The vault key's current epoch (NOT 0) — a tombstone also passes
+            // verify_record_authority in membership mode.
             key_epoch: self.key_epoch.get(),
         })
     }
 
-    /// Удаляет item (tombstone с возросшей версией). Tombstone и очистка истории
-    /// версий — **атомарно** (одна транзакция): краш не оставит tombstone с живой
-    /// историей, иначе удалённый plaintext «воскрес» бы через `get_item_version`.
+    /// Deletes an item (tombstone with a bumped version). The tombstone and clearing the version
+    /// history are **atomic** (one transaction): a crash will not leave a tombstone with live
+    /// history, otherwise the deleted plaintext would "resurrect" through `get_item_version`.
     pub fn delete_item(&self, item_id: &[u8]) -> Result<(), VaultError> {
         let existing = self
             .storage
@@ -569,11 +569,11 @@ impl<'a> Vault<'a> {
         Ok(())
     }
 
-    /// Переименовывает (перемещает) item: создаёт `new_id` с тем же типом и
-    /// контентом, помечает `old_id` tombstone. Per-item ключ и привязка (AAD)
-    /// пересоздаются под новый id. Ошибка, если `new_id` уже занят живым item.
-    /// Семантика синка: rename = удаление старого + создание нового (как в
-    /// большинстве систем), история версий старого id обрывается tombstone'ом.
+    /// Renames (moves) an item: creates `new_id` with the same type and
+    /// content, marks `old_id` as a tombstone. The per-item key and binding (AAD)
+    /// are re-created under the new id. Errors if `new_id` is already taken by a live item.
+    /// Sync semantics: rename = delete the old + create the new (as in
+    /// most systems), the version history of the old id is cut off by the tombstone.
     pub fn rename_item(&self, old_id: &[u8], new_id: &[u8]) -> Result<(), VaultError> {
         if old_id == new_id {
             return Ok(());
@@ -584,10 +584,10 @@ impl<'a> Vault<'a> {
             }
         }
         let item = self.get_item(old_id)?.ok_or(VaultError::NotFound)?;
-        // Атомарно: создаём новый id и хороним старый в одной транзакции, чтобы
-        // сбой между шагами не оставил контент живым под обоими id. Tombstone и
-        // очистку истории старого id инлайним (не через delete_item, иначе был бы
-        // вложенный BEGIN).
+        // Atomically: create the new id and bury the old one in one transaction, so
+        // a failure between steps does not leave the content live under both ids. The tombstone
+        // and clearing the old id's history are inlined (not via delete_item, otherwise there would be
+        // a nested BEGIN).
         self.storage.transaction(|| {
             self.put_item(new_id, item.item_type, item.content.as_slice())?;
             let tomb = self.tombstone_record(old_id, item.item_type, item.version + 1)?;
@@ -598,19 +598,19 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// **Устанавливает/расширяет членство волта** (server-tz §5): если manifest ещё
-    /// нет — создаёт genesis-набор на эпохе 1; иначе расширяет проверенный набор
-    /// последней эпохи и выпускает новый manifest на `latest+1`. Per-member гранты
-    /// обёртывают **текущий VK** (`self.vk`) под X25519-pubkey каждого получателя.
+    /// **Establishes/extends vault membership** (server-tz §5): if there is no manifest
+    /// yet — creates the genesis set at epoch 1; otherwise extends the verified set
+    /// of the latest epoch and issues a new manifest at `latest+1`. Per-member grants
+    /// wrap the **current VK** (`self.vk`) under each recipient's X25519 pubkey.
     ///
-    /// `members` — полный целевой набор (member-id = Ed25519-pubkey + роль).
-    /// `x25519_by_ed` — соответствие `(member_ed25519_pub, member_x25519_pub)` для
-    /// каждого члена-получателя обёртки VK. Владелец (`self.keyset`) обязан быть в
-    /// наборе как `Admin` (иначе позднейшая запись от него не пройдёт authority).
+    /// `members` — the full target set (member-id = Ed25519 pubkey + role).
+    /// `x25519_by_ed` — the mapping `(member_ed25519_pub, member_x25519_pub)` for
+    /// each member receiving a VK wrapping. The owner (`self.keyset`) must be in the
+    /// set as `Admin` (otherwise a later record from them will not pass authority).
     ///
-    /// **VK наружу не уходит:** обёртка строится внутри (free `add_member`). Это путь
-    /// записи manifest+гранты с self-verify до персиста; read-путь самодостаточно
-    /// перепроверяет цепочку. Возвращает эпоху записанного manifest.
+    /// **The VK does not leave:** the wrapping is built internally (free `add_member`). This is the
+    /// write path for manifest+grants with self-verify before persist; the read path
+    /// self-sufficiently re-verifies the chain. Returns the epoch of the written manifest.
     pub fn establish_or_extend_membership(
         &self,
         admin_keyset: &UnlockedKeyset,
@@ -629,8 +629,8 @@ impl<'a> Vault<'a> {
             }
             None => (1u64, None),
         };
-        // гранты: (recipient_x25519, member_ed25519, role) для каждого члена,
-        // у которого известен x25519.
+        // grants: (recipient_x25519, member_ed25519, role) for each member
+        // whose x25519 is known.
         let mut grants: Vec<(Vec<u8>, Vec<u8>, MemberRole)> = Vec::new();
         for m in members {
             if let Some((_, x)) = x25519_by_ed.iter().find(|(ed, _)| ed == &m.ed25519_pub) {
@@ -649,16 +649,16 @@ impl<'a> Vault<'a> {
             &self.vk,
         )?;
 
-        // Ре-якорим vault-запись на свежий `key_epoch` (server-tz §5/§6.2): иначе
-        // запись остаётся на key_epoch=0, а волт уже в membership-режиме — тогда
-        // `verify_record_authority` ищет несуществующий manifest@0 и аудит падает.
-        // VK не меняется (это не ротация) — переподписываем ту же обёртку с
-        // version+1 и новой эпохой. Делаем это ТОЛЬКО когда владелец записи
-        // (`self.keyset` = genesis_owner, автор и получатель `wrapped_vk`) состоит
-        // в проверенном наборе@key_epoch И МОЖЕТ В НЕГО ПИСАТЬ (`can_write`, не просто
-        // `contains`) — иначе переподписанная им запись будет авторизована Viewer'ом и
-        // `verify_record_authority` её отвергнет (волт нечитаем). Owner всегда Admin в
-        // штатном пути; проверка — defense-in-depth против Viewer-owner-набора.
+        // Re-anchor the vault record onto the fresh `key_epoch` (server-tz §5/§6.2): otherwise
+        // the record stays at key_epoch=0 while the vault is already in membership mode — then
+        // `verify_record_authority` looks for a nonexistent manifest@0 and the audit fails.
+        // The VK does not change (this is not a rotation) — we re-sign the same wrapping with
+        // version+1 and the new epoch. We do this ONLY when the record's owner
+        // (`self.keyset` = genesis_owner, the author and recipient of `wrapped_vk`) is in
+        // the verified set@key_epoch AND CAN WRITE TO IT (`can_write`, not just
+        // `contains`) — otherwise a record they re-sign would be authorized as a Viewer and
+        // `verify_record_authority` would reject it (the vault becomes unreadable). The owner is always Admin on
+        // the normal path; the check is defense-in-depth against a Viewer-owner set.
         if verified.can_write(&genesis_owner) {
             let vrec = self
                 .storage
@@ -694,16 +694,16 @@ impl<'a> Vault<'a> {
             self.storage.put_vault(&new_vrec)?;
             self.storage.mark_vault_dirty(&self.vault_id)?; // re-anchored record → push
         }
-        // Поднимаем in-memory эпоху, чтобы put_item на ЭТОМ же инстансе после
-        // установления членства штамповал актуальную эпоху (а не 0). Переоткрытый
-        // волт читает её из vault-записи в Vault::open.
+        // Raise the in-memory epoch, so that put_item on THIS same instance after
+        // establishing membership stamps the current epoch (not 0). A re-opened
+        // vault reads it from the vault record in Vault::open.
         self.key_epoch.set(key_epoch);
         Ok(key_epoch)
     }
 
-    /// Меняет cache-policy волта (server-tz §6.6): version+1, переподпись записи,
-    /// `put_vault`. `cache_policy` — открытая метадата (вне подписываемого
-    /// контента), но запись всё равно переподписывается с новой версией (LWW).
+    /// Changes the vault's cache-policy (server-tz §6.6): version+1, re-signing the record,
+    /// `put_vault`. `cache_policy` is open metadata (outside the signed
+    /// content), but the record is re-signed with a new version anyway (LWW).
     pub fn set_cache_policy(&mut self, policy: CachePolicy) -> Result<(), VaultError> {
         let version = self.version + 1;
         let name_blob = aead_encrypt(
@@ -711,7 +711,7 @@ impl<'a> Vault<'a> {
             self.name.as_slice(),
             &name_aad(&self.vault_id, version),
         )?;
-        // сохраняем текущий key_epoch/sync_target из БД-записи.
+        // preserve the current key_epoch/sync_target from the DB record.
         let cur = self
             .storage
             .get_vault(&self.vault_id)?
@@ -740,12 +740,12 @@ impl<'a> Vault<'a> {
         Ok(())
     }
 
-    /// Обёртывает VK под X25519-публичный ключ получателя, возвращая
-    /// `Enc(VK, recipient_pub)` с тем же доменно-разделённым биндингом
-    /// `vk_wrap_info(vault_id, recipient_ed25519, key_epoch)`, что и боевые
-    /// per-member гранты (F17) — так конверт открывается ровно через
-    /// [`crate::open_grant`] получателем, а не привязан к сырому `vault_id`.
-    /// Привязка к текущей `key_epoch` волта.
+    /// Wraps the VK under the recipient's X25519 public key, returning
+    /// `Enc(VK, recipient_pub)` with the same domain-separated binding
+    /// `vk_wrap_info(vault_id, recipient_ed25519, key_epoch)` as the production
+    /// per-member grants (F17) — so the envelope is opened exactly via
+    /// [`crate::open_grant`] by the recipient, and is not bound to the raw `vault_id`.
+    /// Bound to the vault's current `key_epoch`.
     pub fn seal_vk_to_recipient(
         &self,
         recipient_x25519_pub: &[u8],
@@ -757,60 +757,60 @@ impl<'a> Vault<'a> {
         Ok(seal_key_to_public(&pk, &self.vk, &info)?)
     }
 
-    /// **Eager-ротация Vault Key** (server-tz §6.2 / §1.1) для волта **с членством**.
+    /// **Eager Vault Key rotation** (server-tz §6.2 / §1.1) for a vault **with membership**.
     ///
-    /// Генерирует новый `VK'`, поднимает эпоху (`new = current + 1`), выпускает
-    /// новый admin-подписанный manifest над `remaining_members` (sigchain от
-    /// прошлой эпохи), per-member гранты под `VK'` (биндинг
-    /// `vk_wrap_info(vault_id, member, new_epoch)`), **re-wrap** каждого живого item
-    /// под `VK'` (плейнтекст и per-item ключ не меняются — меняется только обёртка
-    /// ключа и эпоха записи), обновляет vault-запись (`key_epoch=new`, `version+1`,
-    /// `wrapped_vk` владельца под `VK'`) и поднимает **пол эпохи** до `new`. ВСЁ — в
-    /// одной транзакции (атомарно: частичный сбой → консистентный rollback).
+    /// Generates a new `VK'`, raises the epoch (`new = current + 1`), issues
+    /// a new admin-signed manifest over `remaining_members` (a sigchain from
+    /// the previous epoch), per-member grants under `VK'` (binding
+    /// `vk_wrap_info(vault_id, member, new_epoch)`), **re-wraps** each live item
+    /// under `VK'` (the plaintext and per-item key do not change — only the key wrapping
+    /// and the record's epoch change), updates the vault record (`key_epoch=new`, `version+1`,
+    /// the owner's `wrapped_vk` under `VK'`) and raises the **epoch floor** to `new`. ALL in
+    /// one transaction (atomically: a partial failure → a consistent rollback).
     ///
-    /// **Scope (D-SCOPE):** применяется ТОЛЬКО к волтам с manifest на текущую эпоху.
-    /// Одно-владельческий local-волт (manifest нет) → `VaultError::NotAMember` (не
-    /// ротируется; D2 из P3 — их поведение не меняется).
+    /// **Scope (D-SCOPE):** applies ONLY to vaults with a manifest at the current epoch.
+    /// A single-owner local vault (no manifest) → `VaultError::NotAMember` (not
+    /// rotated; D2 from P3 — their behavior does not change).
     ///
-    /// `admin_keyset` должен быть `Admin` в проверенном наборе текущей эпохи, иначе
-    /// `VaultError::AuthorityInvalid`. Отозванный член просто **отсутствует** в
-    /// `remaining_members`/`grants` → не получает грант под `VK'`.
+    /// `admin_keyset` must be `Admin` in the verified set of the current epoch, otherwise
+    /// `VaultError::AuthorityInvalid`. A revoked member is simply **absent** from
+    /// `remaining_members`/`grants` → does not receive a grant under `VK'`.
     ///
-    /// `grants` — `(recipient_x25519_pub, member_ed25519_pub, role)` на каждого
-    /// получателя обёртки `VK'`. Возвращает новую эпоху.
+    /// `grants` — `(recipient_x25519_pub, member_ed25519_pub, role)` for each
+    /// recipient of the `VK'` wrapping. Returns the new epoch.
     ///
-    /// **Граница чистоты:** метод берёт `&self`, обновляет только storage; in-memory
-    /// `self.vk`/`self.version` остаются старыми (валидны для re-wrap СТАРЫХ записей
-    /// до commit). После ротации инстанс `Vault` устарел — для работы под `VK'`
-    /// его следует переоткрыть (`Vault::open`/грант).
+    /// **Purity boundary:** the method takes `&self`, updates only storage; the in-memory
+    /// `self.vk`/`self.version` stay old (valid for re-wrapping the OLD records
+    /// before commit). After rotation the `Vault` instance is stale — to work under `VK'`
+    /// it should be re-opened (`Vault::open`/grant).
     ///
-    /// **Чтение до-ротационной истории** не покрывается (server-tz §6.2): re-wrap
-    /// касается только текущего поколения item-ключей; полноценный seed-chain —
-    /// ⏳ ПОТОМ (свою крипту не писать).
+    /// **Reading pre-rotation history** is not covered (server-tz §6.2): the re-wrap
+    /// touches only the current generation of item keys; a full seed-chain is
+    /// ⏳ LATER (do not roll your own crypto).
     pub fn rotate_vk(
         &self,
         admin_keyset: &UnlockedKeyset,
         remaining_members: &[Member],
         grants: &[(Vec<u8>, Vec<u8>, MemberRole)],
     ) -> Result<u64, VaultError> {
-        // genesis-якорь = pubkey создателя волта (= владелец keyset, открывший волт).
+        // genesis anchor = the vault creator's pubkey (= the owner keyset that opened the vault).
         let genesis_owner = self.keyset.signing.verifying.to_bytes().to_vec();
 
-        // 0) vault-запись + текущая membership-эпоха.
+        // 0) vault record + current membership epoch.
         let vrec = self
             .storage
             .get_vault(&self.vault_id)?
             .ok_or(VaultError::NotFound)?;
-        // D-SCOPE: ротация только для волта с manifest. Текущая membership-эпоха =
-        // наибольшая эпоха существующего манифеста (vault-запись свежесозданного
-        // волта несёт key_epoch=0, а genesis-manifest — на эпохе 1; они
-        // синхронизируются только начиная с первой ротации). Манифеста нет →
-        // одно-владельческий local-волт → не ротируется (D2 из P3).
+        // D-SCOPE: rotation only for a vault with a manifest. The current membership epoch =
+        // the highest epoch of an existing manifest (the vault record of a freshly created
+        // vault carries key_epoch=0, while the genesis manifest is at epoch 1; they
+        // synchronize only starting from the first rotation). No manifest →
+        // a single-owner local vault → not rotated (D2 from P3).
         let current_epoch = match self.storage.latest_membership_epoch(&self.vault_id)? {
             Some(e) => e,
             None => return Err(VaultError::NotAMember),
         };
-        // проверяем цепочку до current_epoch и что админ — Admin@current.
+        // verify the chain up to current_epoch and that the admin is Admin@current.
         let prev =
             verify_chain_to_epoch(self.storage, &self.vault_id, current_epoch, &genesis_owner)?;
         let admin_ed = admin_keyset.signing.verifying.to_bytes().to_vec();
@@ -825,21 +825,21 @@ impl<'a> Vault<'a> {
         // 1) VK'
         let vk_prime = SymmetricKey::generate();
 
-        // 3) новый manifest @ new_epoch (sigchain от prev) + self-verify.
+        // 3) new manifest @ new_epoch (sigchain from prev) + self-verify.
         let manifest = build_manifest(admin_keyset, &self.vault_id, new_epoch, remaining_members)?;
         let verified_new = verify_manifest(&manifest, &self.vault_id, Some(&prev), &genesis_owner)?;
 
-        // P4-ревью (hardening): re-wrapped items И новую vault-запись подписывает
-        // self.keyset (== genesis_owner). Если админ != владелец и опускает
-        // владельца из remaining_members, эти записи на new_epoch авторствует
-        // не-член → verify_record_authority позже вернёт NotAuthorized (волт станет
-        // нечитаемым). Отвергаем такую ротацию ДО любых записей: автор re-wrap'а
-        // обязан быть членом@new_epoch.
+        // P4 review (hardening): the re-wrapped items AND the new vault record are signed by
+        // self.keyset (== genesis_owner). If the admin != owner and drops
+        // the owner from remaining_members, these records at new_epoch are authored by
+        // a non-member → verify_record_authority will later return NotAuthorized (the vault becomes
+        // unreadable). We reject such a rotation BEFORE any writes: the re-wrap's author
+        // must be a member@new_epoch.
         if !verified_new.can_write(&genesis_owner) {
             return Err(VaultError::NotAMember);
         }
 
-        // 4) per-member гранты под VK' + verify против нового набора.
+        // 4) per-member grants under VK' + verify against the new set.
         let mut built_grants = Vec::with_capacity(grants.len());
         for (recip_x, member_ed, role) in grants {
             let g = build_grant(
@@ -855,7 +855,7 @@ impl<'a> Vault<'a> {
             built_grants.push(g);
         }
 
-        // 6) новая vault-запись: wrapped_vk владельца под VK', key_epoch=new, version+1.
+        // 6) new vault record: the owner's wrapped_vk under VK', key_epoch=new, version+1.
         let v_version = vrec
             .version
             .checked_add(1)
@@ -884,14 +884,14 @@ impl<'a> Vault<'a> {
             vrec.sync_tenant.clone(),
         )?;
 
-        // 5) re-wrap живых items под VK' (заранее, чтобы транзакция была короткой).
+        // 5) re-wrap live items under VK' (in advance, to keep the transaction short).
         let live = self.storage.list_items(&self.vault_id)?;
         let mut rewrapped = Vec::with_capacity(live.len());
         for it in &live {
             rewrapped.push(self.rewrap_item(it, &vk_prime, new_epoch)?);
         }
 
-        // АТОМАРНО: manifest + гранты + items + vault-запись + пол эпохи.
+        // ATOMICALLY: manifest + grants + items + vault record + epoch floor.
         self.storage.transaction(|| {
             self.storage.put_membership_manifest(&manifest)?;
             for g in &built_grants {
@@ -911,40 +911,40 @@ impl<'a> Vault<'a> {
             Ok::<(), VaultError>(())
         })?;
 
-        // Поднимаем in-memory эпоху: хотя `self.vk`/`self.version` устарели (см.
-        // докстринг — для работы под VK' волт переоткрывают), отражаем новую эпоху
-        // в инстансе для консистентности Debug/повторных чтений до переоткрытия.
+        // Raise the in-memory epoch: although `self.vk`/`self.version` are stale (see
+        // the docstring — to work under VK' the vault is re-opened), we reflect the new epoch
+        // in the instance for consistency of Debug/repeated reads before re-opening.
         self.key_epoch.set(new_epoch);
         Ok(new_epoch)
     }
 
-    /// Re-wrap одного живого item под новый VK: разворачивает per-item ключ старым
-    /// VK, заново обёртывает под `vk_prime` (AAD обёртки = item_id, не зависит от
-    /// эпохи), bump версии, `key_epoch=new_epoch`, **пере-шифровывает контент тем же
-    /// per-item ключом** под новый-версионный AAD (плейнтекст идентичен) и
-    /// пере-подписывает. Возвращает готовую запись (storage кладёт в транзакции).
+    /// Re-wraps one live item under the new VK: unwraps the per-item key with the old
+    /// VK, re-wraps it under `vk_prime` (the wrapping AAD = item_id, independent of
+    /// the epoch), bumps the version, `key_epoch=new_epoch`, **re-encrypts the content with the same
+    /// per-item key** under the new-version AAD (the plaintext is identical) and
+    /// re-signs. Returns the ready record (storage puts it in a transaction).
     fn rewrap_item(
         &self,
         record: &ItemRecord,
         vk_prime: &SymmetricKey,
         new_epoch: u64,
     ) -> Result<ItemRecord, VaultError> {
-        // 1) per-item ключ из старого VK (AAD = item_id). read-fallback: legacy-волт
-        //    (до round 2) читается старым keywrap, а re-wrap ниже — уже текущим.
+        // 1) per-item key from the old VK (AAD = item_id). read-fallback: a legacy vault
+        //    (before round 2) is read with the old keywrap, while the re-wrap below uses the current one.
         let item_key = unwrap_key_compat(&self.vk, &record.wrapped_item_key, &record.item_id)?;
-        // 2) расшифровать контент под СТАРЫМ AAD (текущая версия записи).
+        // 2) decrypt the content under the OLD AAD (the record's current version).
         let old_aad = item_aad(&self.vault_id, &record.item_id, record.version);
         let plaintext = aead_decrypt_compat(&item_key, &record.content_blob, &old_aad)?;
-        // 3) bump версии; новый AAD; пере-шифровать тем же per-item ключом.
+        // 3) bump the version; new AAD; re-encrypt with the same per-item key.
         let new_version = record
             .version
             .checked_add(1)
             .ok_or(VaultError::EpochInvalid)?;
         let new_aad = item_aad(&self.vault_id, &record.item_id, new_version);
         let content_blob = aead_encrypt(&item_key, &plaintext, &new_aad)?;
-        // 4) пере-обёртка per-item ключа под VK' (AAD = item_id).
+        // 4) re-wrap the per-item key under VK' (AAD = item_id).
         let wrapped_item_key = wrap_key(vk_prime, &item_key, &record.item_id)?;
-        // 5) пере-подпись над (new_aad, новый content_blob).
+        // 5) re-sign over (new_aad, new content_blob).
         let vo = VersionedObject::from_content(new_aad, &content_blob);
         let signature = sign_version(&self.keyset.signing.signing, &vo)?;
         Ok(ItemRecord {
@@ -963,24 +963,24 @@ impl<'a> Vault<'a> {
         })
     }
 
-    /// Read-only аудит целостности волта: пере-проверяет Ed25519-подпись
-    /// vault-записи и **всех** item-записей (включая tombstones) против их
-    /// `author_pubkey`, а сам авторитет автора сверяет **члено-осведомлённо**.
-    /// Ловит порчу блобов (подпись не сходится), подмену автора (валидная подпись
-    /// под чужим ключом), старо-эпоховые/не-членские записи и структурный мусор —
-    /// БЕЗ разворота VK и расшифровки контента. Отчёт не содержит ни байта секрета.
+    /// Read-only integrity audit of the vault: re-verifies the Ed25519 signature of
+    /// the vault record and **all** item records (including tombstones) against their
+    /// `author_pubkey`, and checks the author's authority itself **member-aware**.
+    /// Catches blob corruption (signature does not verify), author swapping (a valid signature
+    /// under someone else's key), stale-epoch/non-member records and structural garbage —
+    /// WITHOUT unwrapping the VK and decrypting the content. The report contains not a byte of a secret.
     ///
-    /// **Авторитет (D-VERIFY-CHAIN, P4):** режим определяется **vault-level
-    /// сигналом** ([`vault_is_membership_mode`]), НЕ `key_epoch` отдельной записи
-    /// (иначе downgrade подменой неподписанного `key_epoch` пройдёт аудит). В
-    /// membership-режиме (есть пол ИЛИ хотя бы один manifest) автор проверяется
-    /// полной D1-цепочкой авторитета до genesis, требует manifest@`key_epoch` И
-    /// `key_epoch >= пол` (anti-rollback, §1.1) через [`verify_record_authority`];
-    /// любое нарушение → `NotAuthorized`. В одно-владельческом режиме (нет ни пола,
-    /// ни манифестов — D2, local-волты) — прежняя сверка `author == owner`.
+    /// **Authority (D-VERIFY-CHAIN, P4):** the mode is determined by the **vault-level
+    /// signal** ([`vault_is_membership_mode`]), NOT the `key_epoch` of an individual record
+    /// (otherwise a downgrade by swapping the unsigned `key_epoch` would pass the audit). In
+    /// membership mode (there is a floor OR at least one manifest) the author is verified by
+    /// the full D1 authority chain up to genesis, requires manifest@`key_epoch` AND
+    /// `key_epoch >= floor` (anti-rollback, §1.1) via [`verify_record_authority`];
+    /// any violation → `NotAuthorized`. In single-owner mode (neither a floor,
+    /// nor manifests — D2, local vaults) — the former `author == owner` check.
     ///
-    /// `Err` только при сбое storage верхнего уровня; плохие подписи/авторы — это
-    /// данные отчёта.
+    /// `Err` only on a top-level storage failure; bad signatures/authors are
+    /// report data.
     pub fn verify_chain(&self) -> Result<IntegrityReport, VaultError> {
         let trusted = self.keyset.signing.verifying.to_bytes();
         let mut issues = Vec::new();
@@ -1032,8 +1032,8 @@ impl<'a> Vault<'a> {
             checked += 1;
             audit(&rec, &mut issues);
         }
-        // Архивные версии (история секретов) тоже подписаны — аудитим и их, иначе
-        // подмена старой версии в item_history прошла бы незамеченной до reveal.
+        // Archived versions (secret history) are also signed — we audit them too, otherwise
+        // swapping an old version in item_history would go unnoticed until reveal.
         for rec in self.storage.list_all_history(&self.vault_id)? {
             checked += 1;
             audit(&rec, &mut issues);
@@ -1046,7 +1046,7 @@ impl<'a> Vault<'a> {
     }
 }
 
-// --- associated data хелперы ---
+// --- associated data helpers ---
 
 fn name_aad(vault_id: &[u8], version: u64) -> AssociatedData {
     AssociatedData::new(vault_id.to_vec(), b"__vault_name__".to_vec(), version)
@@ -1060,19 +1060,19 @@ fn item_aad(vault_id: &[u8], item_id: &[u8], version: u64) -> AssociatedData {
     AssociatedData::new(vault_id.to_vec(), item_id.to_vec(), version)
 }
 
-// --- read-fallback на pre-round-2 формат (см. SECURITY.md → On-disk format changes) ---
+// --- read-fallback to the pre-round-2 format (see SECURITY.md → On-disk format changes) ---
 //
-// Волты, созданные до round 2 (crypto-agility binding), обёрнуты старыми схемами:
-// owner-VK с info=сырой vault_id (не vk_wrap_info), item-ключи без доменного тега
-// keywrap, контент/имя без привязки заголовка в AAD. Подпись записи НЕ менялась
-// (старые записи верифицируются). Эти хелперы читают и текущий, и pre-round-2
-// формат: сперва текущая схема, при провале — замороженный legacy-кодек. Новые
-// записи (put_item/set_name/rotate) уже пишутся текущей схемой, так что любая
-// модификация естественно «подтягивает» запись вперёд; чистое чтение старых
-// данных остаётся доступным без перезаписи/ре-подписи/синк-шума.
+// Vaults created before round 2 (crypto-agility binding) are wrapped with the old schemes:
+// owner-VK with info=raw vault_id (not vk_wrap_info), item keys without the keywrap
+// domain tag, content/name without the header binding in the AAD. The record signature did NOT change
+// (old records verify). These helpers read both the current and the pre-round-2
+// format: first the current scheme, on failure — the frozen legacy codec. New
+// records (put_item/set_name/rotate) are already written with the current scheme, so any
+// modification naturally "pulls" the record forward; plain reading of old
+// data stays available without rewrite/re-sign/sync noise.
 
-/// Открывает owner-VK: текущая привязка `vk_wrap_info`, при провале — pre-round-2
-/// (`info` = сырой `vault_id`). Чужой keyset не пройдёт ни ту, ни другую → `Decrypt`.
+/// Opens the owner-VK: the current `vk_wrap_info` binding, on failure — pre-round-2
+/// (`info` = raw `vault_id`). Another keyset passes neither → `Decrypt`.
 fn open_owner_vk(
     secret: &unissh_crypto::X25519SecretKey,
     wrapped_vk: &[u8],
@@ -1084,11 +1084,11 @@ fn open_owner_vk(
     if let Ok(vk) = open_key_with_secret(secret, wrapped_vk, &info) {
         return Ok(vk);
     }
-    // pre-round-2: owner-обёртка биндилась к сырому vault_id (без owner_ed/epoch).
+    // pre-round-2: the owner wrapping was bound to the raw vault_id (without owner_ed/epoch).
     open_key_with_secret(secret, wrapped_vk, vault_id).map_err(|_| VaultError::Decrypt)
 }
 
-/// AEAD-расшифровка с fallback на pre-round-2 (заголовок не привязан к AAD).
+/// AEAD decryption with a fallback to pre-round-2 (the header is not bound to the AAD).
 fn aead_decrypt_compat(
     key: &SymmetricKey,
     blob: &[u8],
@@ -1100,7 +1100,7 @@ fn aead_decrypt_compat(
     aead_decrypt_pre_agility(key, blob, aad).map_err(|_| VaultError::Decrypt)
 }
 
-/// keywrap-unwrap с fallback на pre-round-2 (без доменного тега и привязки заголовка).
+/// keywrap-unwrap with a fallback to pre-round-2 (without the domain tag and header binding).
 fn unwrap_key_compat(
     kek: &SymmetricKey,
     blob: &[u8],
@@ -1112,7 +1112,7 @@ fn unwrap_key_compat(
     unwrap_key_pre_agility(kek, blob, aad).map_err(|_| VaultError::Decrypt)
 }
 
-// --- подпись/проверка записи волта ---
+// --- signing/verification of the vault record ---
 
 fn vault_signed_content(wrapped_vk: &[u8], name_blob: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(wrapped_vk.len() + name_blob.len());
@@ -1121,13 +1121,13 @@ fn vault_signed_content(wrapped_vk: &[u8], name_blob: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Строит подписанную vault-запись с явной `key_epoch`/`sync_target`/
-/// `cache_policy`/`sync_tenant`. Единственный конструктор vault-записей: `create`
-/// (genesis, эпоха 0, пустой `sync_tenant`), `set_name`/`delete` (сохраняют
-/// текущую эпоху/target/policy/tenant), `set_cache_policy`/`establish`/`rotate`
-/// (эпоха растёт, target/policy/tenant сохраняются). Эпоху 0 в membership-режиме
-/// писать нельзя (downgrade). `sync_tenant` — открытая метка маршрутизации ВНЕ
-/// подписи (подпись её не охватывает): перестроения переносят её 1:1 из БД.
+/// Builds a signed vault record with an explicit `key_epoch`/`sync_target`/
+/// `cache_policy`/`sync_tenant`. The only constructor of vault records: `create`
+/// (genesis, epoch 0, empty `sync_tenant`), `set_name`/`delete` (preserve
+/// the current epoch/target/policy/tenant), `set_cache_policy`/`establish`/`rotate`
+/// (the epoch grows, target/policy/tenant are preserved). Epoch 0 in membership mode
+/// must not be written (downgrade). `sync_tenant` is an open routing label OUTSIDE
+/// the signature (the signature does not cover it): rebuilds carry it over 1:1 from the DB.
 #[allow(clippy::too_many_arguments)]
 fn build_vault_record_epoch(
     keyset: &UnlockedKeyset,
@@ -1155,10 +1155,10 @@ fn build_vault_record_epoch(
         author_pubkey: keyset.signing.verifying.to_bytes().to_vec(),
         key_epoch,
         cache_policy,
-        // sync_tenant — открытая метка маршрутизации, ВНЕ подписываемого контента
-        // (как sync_target/cache_policy): re-sign её не охватывает, существующие
-        // подписи остаются валидны. Конструкторы передают актуальное значение
-        // (genesis — пусто; перестроения — сохраняют текущее из БД-записи).
+        // sync_tenant is an open routing label, OUTSIDE the signed content
+        // (like sync_target/cache_policy): a re-sign does not cover it, existing
+        // signatures stay valid. Constructors pass the current value
+        // (genesis — empty; rebuilds — preserve the current one from the DB record).
         sync_tenant,
     })
 }
@@ -1172,54 +1172,54 @@ fn verify_vault_record(record: &VaultRecord) -> Result<(), VaultError> {
     verify_version(&author, &vo, &record.signature).map_err(|_| VaultError::SignatureInvalid)
 }
 
-// --- авторизация автора записи: member-set@эпоха ИЛИ owner==author (D2) ---
+// --- record author authorization: member-set@epoch OR owner==author (D2) ---
 
-/// Определяет режим волта из **vault-level доверенного сигнала**, а НЕ из
-/// `key_epoch` отдельной (потенциально подменённой) записи. Волт считается
-/// membership-волтом, если у него есть пол эпохи (anti-rollback маркер,
-/// выставляется ротацией) ИЛИ хотя бы один membership-manifest. Иначе — это
-/// одно-владельческий local-волт (D2).
+/// Determines the vault mode from the **vault-level trusted signal**, and NOT from
+/// the `key_epoch` of an individual (potentially swapped) record. A vault is considered
+/// a membership vault if it has an epoch floor (an anti-rollback marker,
+/// set by rotation) OR at least one membership manifest. Otherwise it is
+/// a single-owner local vault (D2).
 ///
-/// ## Почему vault-level, а не per-record (анти-rollback bypass, P4-ревью)
-/// Прежняя версия выбирала режим из `get_membership_manifest(record.key_epoch)`:
-/// `key_epoch` — **неподписанное** поле записи. Untrusted-DB/sync-peer ставил
-/// валидно-owner-подписанной записи `key_epoch=0` (эпоху без manifest), и read-путь
-/// «деградировал» на одно-владельческую сверку (owner==author проходил), пропуская
-/// пол эпохи и D1-цепочку. Так до-ротационная/ниже-пола запись принималась и
-/// `verify_chain`, и живым decrypt-путём. Привязка режима к vault-level сигналу
-/// закрывает downgrade: запись с эпохой без manifest в membership-режиме отвергается.
+/// ## Why vault-level, not per-record (anti-rollback bypass, P4 review)
+/// The previous version chose the mode from `get_membership_manifest(record.key_epoch)`:
+/// `key_epoch` is an **unsigned** record field. An untrusted DB/sync peer set
+/// a validly-owner-signed record to `key_epoch=0` (an epoch without a manifest), and the read path
+/// "degraded" to the single-owner check (owner==author passed), skipping
+/// the epoch floor and the D1 chain. That way a pre-rotation/below-floor record was accepted by both
+/// `verify_chain` and the live decrypt path. Tying the mode to the vault-level signal
+/// closes the downgrade: a record with an epoch without a manifest in membership mode is rejected.
 fn vault_is_membership_mode(storage: &Storage, vault_id: &[u8]) -> Result<bool, VaultError> {
-    // Пиненный per-vault якорь (A0, чужой волт) — тоже сигнал membership-режима:
-    // без него в окне «якорь запинен, но manifest ещё не синкнут» запись автора-
-    // тиммейта прошла бы одно-владельческой веткой (author==anchor) БЕЗ D1-цепочки.
-    // Пиннятся только чужие волты, поэтому собственные (без якоря) не затронуты.
+    // A pinned per-vault anchor (A0, someone else's vault) is also a membership-mode signal:
+    // without it, in the window "the anchor is pinned but the manifest is not yet synced" a
+    // teammate-author's record would pass through the single-owner branch (author==anchor) WITHOUT the D1 chain.
+    // Only someone else's vaults are pinned, so one's own (without an anchor) are unaffected.
     Ok(storage.get_vault_epoch_floor(vault_id)?.is_some()
         || storage.latest_membership_epoch(vault_id)?.is_some()
         || storage.get_vault_trust_anchor(vault_id)?.is_some())
 }
 
-/// Проверяет право автора записи (ТЗ §13 п.8). **Режим волта** определяется
-/// vault-level сигналом ([`vault_is_membership_mode`]), НЕ `record_epoch`:
+/// Verifies the record author's right (spec §13 item 8). The **vault mode** is determined
+/// by the vault-level signal ([`vault_is_membership_mode`]), NOT `record_epoch`:
 ///
-/// - **membership-режим** (есть пол эпохи ИЛИ хотя бы один manifest): требуется
-///   `record_epoch >= пол эпохи` И наличие manifest@`record_epoch` (его отсутствие =
-///   downgrade-попытка → `EpochInvalid`) И `author ∈ члены@эпоха` по
-///   перепроверенной D1-цепочке от genesis. Никакого fallback на owner==author.
-/// - **одно-владельческий local-волт** (нет ни пола, ни манифестов): `author ==
+/// - **membership mode** (there is an epoch floor OR at least one manifest): requires
+///   `record_epoch >= epoch floor` AND the presence of manifest@`record_epoch` (its absence =
+///   a downgrade attempt → `EpochInvalid`) AND `author ∈ members@epoch` by
+///   a re-verified D1 chain from genesis. No fallback to owner==author.
+/// - **single-owner local vault** (neither a floor nor manifests): `author ==
 ///   genesis_owner`.
 ///
-/// `genesis_owner` — доверенный якорь: pubkey создателя волта (= владелец keyset
-/// для local-волтов). Не паникует: любое нарушение — типизированная `VaultError`.
+/// `genesis_owner` — the trusted anchor: the vault creator's pubkey (= the owner keyset
+/// for local vaults). Does not panic: any violation is a typed `VaultError`.
 ///
-/// ## Самодостаточность read-пути (untrusted-DB / sync-ready, ARCH.md)
-/// Этот путь **НЕ доверяет** факту, что manifest лежит в storage. Он заново
-/// перепроверяет **полную D1-цепочку** членства от genesis (epoch 1) до
-/// `record_epoch`, якорясь на пиннингованном `genesis_owner` (см.
-/// [`crate::membership::verify_chain_to_epoch`]). Так оператор-инъектированный
-/// самосогласованный manifest (author=attacker, members=[attacker]) на любой
-/// эпохе отклоняется: цепочка от genesis к attacker не ведёт. Это жёсткая
-/// предпосылка перед member-via-grant получением VK и любым синком (P4) —
-/// read-путь обязан опираться на якорь, а не на хранилище.
+/// ## Self-sufficiency of the read path (untrusted-DB / sync-ready, ARCH.md)
+/// This path does **NOT trust** the fact that the manifest is in storage. It re-verifies
+/// the **full D1 chain** of membership from genesis (epoch 1) to
+/// `record_epoch` from scratch, anchoring on the pinned `genesis_owner` (see
+/// [`crate::membership::verify_chain_to_epoch`]). That way an operator-injected
+/// self-consistent manifest (author=attacker, members=[attacker]) at any
+/// epoch is rejected: the chain from genesis does not lead to the attacker. This is a hard
+/// precondition before a member-via-grant obtains the VK and before any sync (P4) —
+/// the read path must rely on the anchor, not on storage.
 pub fn verify_record_authority(
     storage: &Storage,
     vault_id: &[u8],
@@ -1228,94 +1228,94 @@ pub fn verify_record_authority(
     genesis_owner: &[u8],
 ) -> Result<(), VaultError> {
     if !vault_is_membership_mode(storage, vault_id)? {
-        // D2: одно-владельческий local-волт — прежний owner==author.
+        // D2: single-owner local vault — the former owner==author.
         return if author_pubkey == genesis_owner {
             Ok(())
         } else {
             Err(VaultError::NotAMember)
         };
     }
-    // membership-режим (vault-level): downgrade на owner==author запрещён.
-    // (b) anti-rollback: пол эпохи (дефолт 0).
+    // membership mode (vault-level): a downgrade to owner==author is forbidden.
+    // (b) anti-rollback: the epoch floor (default 0).
     let floor = storage.get_vault_epoch_floor(vault_id)?.unwrap_or(0);
     if record_epoch < floor {
         return Err(VaultError::EpochInvalid);
     }
-    // Запись на эпохе без manifest в membership-режиме — downgrade-попытка.
-    // (Цепочка не может якориться на отсутствующем manifest@record_epoch.)
+    // A record at an epoch without a manifest in membership mode — a downgrade attempt.
+    // (The chain cannot anchor on a missing manifest@record_epoch.)
     if storage
         .get_membership_manifest(vault_id, record_epoch)?
         .is_none()
     {
         return Err(VaultError::EpochInvalid);
     }
-    // (a) Перепроверяем D1-цепочку от genesis_owner до record_epoch —
-    // самодостаточно, без доверия storage. Возвращает проверенный набор@эпоха.
+    // (a) Re-verify the D1 chain from genesis_owner to record_epoch —
+    // self-sufficiently, without trusting storage. Returns the verified set@epoch.
     let members =
         crate::membership::verify_chain_to_epoch(storage, vault_id, record_epoch, genesis_owner)?;
-    // автор ∈ проверенный набор@эпоха.
+    // author ∈ the verified set@epoch.
     if !members.contains(author_pubkey) {
         return Err(VaultError::NotAMember);
     }
-    // ...И имеет роль с правом записи КОНТЕНТА (Editor/Admin). Viewer (read-only)
-    // не вправе авторить item/vault-записи: иначе read-only член мог бы создавать,
-    // перезаписывать (LWW с бампом версии) и ставить tombstone на записи общего
-    // волта, а verify-before-apply у других членов принял бы их как аутентичные —
-    // обход роли Viewer/Editor/Admin (write-integrity gap). Манифесты/гранты
-    // гейтятся отдельно (admin-авторитет в verify_manifest/verify_grant).
+    // ...AND has a role with the right to write CONTENT (Editor/Admin). A Viewer (read-only)
+    // may not author item/vault records: otherwise a read-only member could create,
+    // overwrite (LWW with a version bump) and place a tombstone on the records of a shared
+    // vault, and other members' verify-before-apply would accept them as authentic —
+    // a bypass of the Viewer/Editor/Admin role (write-integrity gap). Manifests/grants
+    // are gated separately (admin authority in verify_manifest/verify_grant).
     if !members.can_write(author_pubkey) {
         return Err(VaultError::AuthorityInvalid);
     }
     Ok(())
 }
 
-// --- аудит целостности (verify_chain) ---
+// --- integrity audit (verify_chain) ---
 
-/// Причина, по которой запись не прошла проверку целостности.
+/// The reason a record failed the integrity check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IntegrityFailure {
-    /// Подпись не верифицируется под заявленным `author_pubkey` (порча
-    /// content/метаданных или повреждённый sig-блоб).
+    /// The signature does not verify under the claimed `author_pubkey` (corruption of
+    /// content/metadata or a damaged sig blob).
     SignatureInvalid,
-    /// `author_pubkey` записи не совпадает с доверенным владельцем волта —
-    /// подмена автора (подпись может быть валидной под чужим ключом).
+    /// The record's `author_pubkey` does not match the vault's trusted owner —
+    /// author swapping (the signature may be valid under someone else's key).
     AuthorMismatch,
-    /// `author_pubkey`/подпись структурно некорректны (не парсятся).
+    /// The `author_pubkey`/signature are structurally invalid (do not parse).
     Malformed,
-    /// Автор записи не входит в подписанный member-set волта на её эпоху, либо
-    /// эпоха записи ниже доверенного пола (anti-rollback) — для membership-волтов.
+    /// The record's author is not in the vault's signed member-set at its epoch, or
+    /// the record's epoch is below the trusted floor (anti-rollback) — for membership vaults.
     NotAuthorized,
 }
 
-/// Одна проблемная запись в отчёте целостности.
+/// One problematic record in the integrity report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrityIssue {
-    /// `item_id` записи; пусто для самой vault-записи.
+    /// The record's `item_id`; empty for the vault record itself.
     pub item_id: Vec<u8>,
-    /// Версия записи, к которой относится проблема.
+    /// The version of the record the problem relates to.
     pub version: u64,
-    /// Tombstone ли это (удалённые записи тоже проверяются).
+    /// Whether this is a tombstone (deleted records are also checked).
     pub tombstone: bool,
-    /// Машиночитаемая причина.
+    /// The machine-readable reason.
     pub failure: IntegrityFailure,
 }
 
-/// Read-only отчёт о целостности волта. Без секретов и без plaintext.
+/// A read-only report on the vault's integrity. Without secrets and without plaintext.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrityReport {
-    /// `true` ⇔ `issues` пуст (vault-запись и все items, включая tombstones, ок).
+    /// `true` ⇔ `issues` is empty (the vault record and all items, including tombstones, are ok).
     pub ok: bool,
-    /// Сколько записей проверено (vault-запись + все item-записи с tombstones).
+    /// How many records were checked (the vault record + all item records with tombstones).
     pub checked: u64,
-    /// Проблемные записи (vault-запись помечается пустым `item_id`).
+    /// The problematic records (the vault record is marked with an empty `item_id`).
     pub issues: Vec<IntegrityIssue>,
 }
 
-/// Проверяет одну item-запись: парс автора → `Malformed`; подпись над
-/// `(AAD vault_id+item_id+version, content_blob)` → `SignatureInvalid`; сверка
-/// `author_pubkey` с доверенным владельцем → `AuthorMismatch`. `None` == ок.
-/// Не разворачивает VK и не расшифровывает контент.
+/// Checks one item record: parsing the author → `Malformed`; the signature over
+/// `(AAD vault_id+item_id+version, content_blob)` → `SignatureInvalid`; comparing
+/// `author_pubkey` with the trusted owner → `AuthorMismatch`. `None` == ok.
+/// Does not unwrap the VK and does not decrypt the content.
 pub fn check_item_record(record: &ItemRecord, trusted_owner: &[u8]) -> Option<IntegrityFailure> {
     let author = match Ed25519VerifyingKey::from_bytes(&record.author_pubkey) {
         Ok(a) => a,
@@ -1332,15 +1332,15 @@ pub fn check_item_record(record: &ItemRecord, trusted_owner: &[u8]) -> Option<In
     None
 }
 
-/// Member-aware проверка авторитета записи для [`Vault::verify_chain`]. Режим
-/// волта определяется **vault-level сигналом** ([`vault_is_membership_mode`]), а
-/// НЕ `record_epoch` отдельной записи (иначе downgrade подменой неподписанного
-/// `key_epoch` пройдёт аудит — P4-ревью). В membership-режиме авторитет сверяется
-/// через [`verify_record_authority`] (D1-цепочка + пол + manifest@epoch);
-/// любое нарушение → `NotAuthorized`. В одно-владельческом режиме — сверка
-/// `author == trusted_owner` (→ `AuthorMismatch` при расхождении). Ошибки storage
-/// внутри аудита трактуются консервативно как `NotAuthorized` (а не паника);
-/// верхнеуровневые storage-вызовы `verify_chain` возвращают `Err` через `?`.
+/// Member-aware check of a record's authority for [`Vault::verify_chain`]. The vault
+/// mode is determined by the **vault-level signal** ([`vault_is_membership_mode`]), and
+/// NOT the `record_epoch` of an individual record (otherwise a downgrade by swapping the unsigned
+/// `key_epoch` would pass the audit — P4 review). In membership mode the authority is checked
+/// via [`verify_record_authority`] (D1 chain + floor + manifest@epoch);
+/// any violation → `NotAuthorized`. In single-owner mode — the check
+/// `author == trusted_owner` (→ `AuthorMismatch` on a mismatch). Storage errors
+/// inside the audit are treated conservatively as `NotAuthorized` (not a panic);
+/// top-level storage calls in `verify_chain` return `Err` via `?`.
 fn check_record_authority(
     storage: &Storage,
     vault_id: &[u8],
@@ -1360,7 +1360,7 @@ fn check_record_authority(
             Err(_) => Some(IntegrityFailure::NotAuthorized),
         },
         Ok(false) => {
-            // одно-владельческая модель (D2): нет пола и нет манифестов.
+            // single-owner model (D2): no floor and no manifests.
             if author_pubkey == trusted_owner {
                 None
             } else {
@@ -1371,8 +1371,8 @@ fn check_record_authority(
     }
 }
 
-/// Проверяет только структуру+подпись item-записи (без сверки автора с владельцем
-/// — авторитет сверяет [`check_record_authority`]).
+/// Checks only the structure+signature of an item record (without comparing the author to the owner
+/// — the authority is checked by [`check_record_authority`]).
 fn item_sig_failure(record: &ItemRecord) -> Option<IntegrityFailure> {
     let author = match Ed25519VerifyingKey::from_bytes(&record.author_pubkey) {
         Ok(a) => a,
@@ -1386,7 +1386,7 @@ fn item_sig_failure(record: &ItemRecord) -> Option<IntegrityFailure> {
     None
 }
 
-/// Аналог [`item_sig_failure`] для vault-записи.
+/// Analog of [`item_sig_failure`] for a vault record.
 fn vault_sig_failure(record: &VaultRecord) -> Option<IntegrityFailure> {
     let author = match Ed25519VerifyingKey::from_bytes(&record.author_pubkey) {
         Ok(a) => a,
@@ -1401,7 +1401,7 @@ fn vault_sig_failure(record: &VaultRecord) -> Option<IntegrityFailure> {
     None
 }
 
-/// Аналог [`check_item_record`] для vault-записи (подпись над
+/// Analog of [`check_item_record`] for a vault record (the signature over
 /// `wrapped_vk || name_blob`).
 pub fn check_vault_record(record: &VaultRecord, trusted_owner: &[u8]) -> Option<IntegrityFailure> {
     let author = match Ed25519VerifyingKey::from_bytes(&record.author_pubkey) {
@@ -1428,14 +1428,14 @@ mod legacy_read_tests {
     use unissh_storage::{ItemRecord, Storage};
 
     fn keyset() -> UnlockedKeyset {
-        // SecretKeyOnly → без Argon2id, быстро.
+        // SecretKeyOnly → without Argon2id, fast.
         create_account(None, KdfParams::recommended()).unwrap().2
     }
 
-    /// Кует pre-round-2 («Scheme A») волт прямо в storage: owner-VK с HPKE-`info` =
-    /// сырой `vault_id` (не `vk_wrap_info`), имя и item-контент без привязки заголовка
-    /// в AAD, item-ключ без доменного тега keywrap. Подпись — ТЕКУЩАЯ (механизм
-    /// подписи не менялся, поэтому такие записи у пользователя и верифицируются).
+    /// Forges a pre-round-2 ("Scheme A") vault directly into storage: owner-VK with HPKE-`info` =
+    /// the raw `vault_id` (not `vk_wrap_info`), name and item content without the header binding
+    /// in the AAD, item key without the keywrap domain tag. The signature is CURRENT (the signing
+    /// mechanism did not change, which is why such records verify on the user's side).
     fn forge_legacy_vault(
         st: &Storage,
         ks: &UnlockedKeyset,
@@ -1448,7 +1448,7 @@ mod legacy_read_tests {
         let vk = SymmetricKey::generate();
         let version = 1u64;
         let name_blob = aead_encrypt_pre_agility(&vk, name, &name_aad(vault_id, version)).unwrap();
-        // owner-обёртка биндилась к сырому vault_id (до round 2).
+        // the owner wrapping was bound to the raw vault_id (before round 2).
         let wrapped_vk = seal_key_to_public(&ks.encryption.public, &vk, vault_id).unwrap();
         let record = build_vault_record_epoch(
             ks,
@@ -1502,8 +1502,8 @@ mod legacy_read_tests {
             b"OLD-SECRET-CONTENT",
         );
 
-        // boot-путь: open (owner-VK + имя) и get_item (item-ключ + контент) — всё
-        // через read-fallback на pre-round-2.
+        // boot path: open (owner-VK + name) and get_item (item key + content) — all
+        // via the read-fallback to pre-round-2.
         let v = Vault::open(&st, &ks, b"v-legacy").unwrap();
         assert_eq!(v.name(), b"Old Vault");
         let got = v.get_item(b"ssh-old").unwrap().unwrap();
@@ -1513,7 +1513,7 @@ mod legacy_read_tests {
 
     #[test]
     fn wrong_keyset_still_fails_on_legacy_vault() {
-        // fallback не должен открывать legacy-волт ЧУЖИМ keyset — обе схемы провалятся.
+        // the fallback must not open a legacy vault with ANOTHER keyset — both schemes fail.
         let st = Storage::open_in_memory(&[7u8; 32]).unwrap();
         let ks = keyset();
         forge_legacy_vault(&st, &ks, b"v", b"n", b"i", 1, b"c");
@@ -1526,7 +1526,7 @@ mod legacy_read_tests {
 
     #[test]
     fn current_vault_unaffected_by_fallback() {
-        // Регрессия: текущий формат открывается первой же попыткой, fallback не мешает.
+        // Regression: the current format opens on the first attempt, the fallback does not interfere.
         let st = Storage::open_in_memory(&[7u8; 32]).unwrap();
         let ks = keyset();
         let v = Vault::create(&st, &ks, b"v-cur".to_vec(), b"New").unwrap();

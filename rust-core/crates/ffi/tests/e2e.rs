@@ -1,9 +1,9 @@
-//! Сквозной локальный сценарий через FFI-фасад (Definition of Done ядра):
-//! создать local-волт → сгенерить SSH-ключ → подключиться к серверу
-//! (в т.ч. через ProxyJump) — без сервера-инстанса и без UI.
+//! End-to-end local scenario through the FFI facade (core Definition of Done):
+//! create a local vault → generate an SSH key → connect to a server
+//! (including via ProxyJump) — without a server instance and without the UI.
 //!
-//! Плюс проверка жёсткого ограничения: приватный ключ не утекает на диск в
-//! открытом виде и не отдаётся наружу.
+//! Plus a check of a hard constraint: the private key never leaks to disk in
+//! plaintext and is never handed out.
 
 use std::net::TcpStream as StdTcp;
 use std::process::{Child, Command, Stdio};
@@ -102,9 +102,9 @@ impl TestSshd {
         }
     }
 
-    /// Как [`Self::start`], но с `MaxSessions {max_sessions}` — сервер отклонит
-    /// открытие большего числа session-каналов (`AdministrativelyProhibited`).
-    /// Для проверки деградации пула SFTP-каналов на рестриктивном сервере.
+    /// Like [`Self::start`], but with `MaxSessions {max_sessions}` — the server
+    /// will refuse to open more session channels (`AdministrativelyProhibited`).
+    /// For testing SFTP channel-pool degradation against a restrictive server.
     fn start_with_max_sessions(authorized_pubkey: &str, max_sessions: u32) -> TestSshd {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -160,8 +160,8 @@ impl TestSshd {
 }
 
 impl TestSshd {
-    /// Поднимает sshd, доверяющий user-сертификатам, подписанным `ca_pubkey`
-    /// (через TrustedUserCAKeys), вместо authorized_keys.
+    /// Brings up an sshd that trusts user certificates signed by `ca_pubkey`
+    /// (via TrustedUserCAKeys) instead of authorized_keys.
     fn start_with_ca(ca_pubkey: &str) -> TestSshd {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -254,7 +254,7 @@ fn end_to_end_local_scenario() {
     assert_eq!(res.stdout.trim(), "ffi-e2e");
     assert_eq!(res.exit_status, 0);
 
-    // lock → unlock тем же паролем + Secret Key; данные сохраняются
+    // lock → unlock with the same password + Secret Key; data is preserved
     core.lock();
     assert!(!core.is_unlocked());
     core.unlock(Some("master-pw".to_string()), secret).unwrap();
@@ -304,10 +304,10 @@ fn private_key_never_stored_in_plaintext() {
         .generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
 
-    // публичный — это публичный
+    // public is public
     assert!(pubkey.contains("ssh-ed25519"));
 
-    // на диске (зашифрованная БД + сайдкар keyset) нет маркера OpenSSH-приватника
+    // on disk (encrypted DB + keyset sidecar) there is no OpenSSH private-key marker
     let db = std::fs::read(dir.path().join("inst.db")).unwrap();
     let keyset = std::fs::read(dir.path().join("keyset.bin")).unwrap();
     let marker = b"OPENSSH PRIVATE KEY";
@@ -327,12 +327,12 @@ fn create_account_rejects_existing_instance() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
-    // повторно тем же Core — инстанс уже существует
+    // again with the same Core — the instance already exists
     assert!(matches!(
         core.create_account(None),
         Err(unissh_ffi::FfiError::AlreadyExists)
     ));
-    // и новым Core по тем же путям — тоже
+    // and with a new Core over the same paths — also
     let core2 = new_core(dir.path());
     assert!(matches!(
         core2.create_account(None),
@@ -387,7 +387,7 @@ fn certificate_auth() {
         .generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
 
-    // CA + подпись пользовательского публичного ключа сертификатом (принципал root)
+    // CA + signing the user's public key with a certificate (principal root)
     let work = tempfile::tempdir().unwrap();
     let ca = work.path().join("ca");
     assert!(Command::new("ssh-keygen")
@@ -411,11 +411,11 @@ fn certificate_auth() {
         .success());
     let cert = std::fs::read_to_string(work.path().join("user-cert.pub")).unwrap();
 
-    // импортируем сертификат в ядро
+    // import the certificate into the core
     core.import_ssh_certificate("v".to_string(), "key".to_string(), cert)
         .unwrap();
 
-    // в листинге ключ помечен как имеющий сертификат
+    // in the listing the key is flagged as having a certificate
     let items = core.list_items("v".to_string()).unwrap();
     let key_item = items.iter().find(|i| i.item_id == "key").unwrap();
     assert!(
@@ -423,7 +423,7 @@ fn certificate_auth() {
         "key should report has_certificate"
     );
 
-    // sshd доверяет CA → аутентификация по сертификату
+    // sshd trusts the CA → authentication via certificate
     let sshd = TestSshd::start_with_ca(&ca_pub);
     let res = core
         .ssh_exec(
@@ -441,9 +441,9 @@ fn certificate_auth() {
 
 #[test]
 fn import_pkcs1_rsa_key_and_auth() {
-    // Сценарий пользователя через FFI: классический PKCS#1 (`-----BEGIN RSA
-    // PRIVATE KEY-----`) импортируется в волт и работает для аутентификации
-    // (импорт нормализует его в OpenSSH; коннект идёт rsa-sha2-512).
+    // User scenario through FFI: a classic PKCS#1 (`-----BEGIN RSA
+    // PRIVATE KEY-----`) is imported into the vault and works for authentication
+    // (import normalizes it to OpenSSH; the connection uses rsa-sha2-512).
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -462,11 +462,11 @@ fn import_pkcs1_rsa_key_and_auth() {
         "expected rsa pub, got {pubkey}"
     );
 
-    // ключ сохранён в волте отдельным item-ом
+    // the key is stored in the vault as a separate item
     let items = core.list_items("v".to_string()).unwrap();
     assert!(items.iter().any(|i| i.item_id == "rsa"), "key item stored");
 
-    // полный коннект к настоящему sshd импортированным PKCS#1-ключом
+    // full connect to a real sshd with the imported PKCS#1 key
     let sshd = TestSshd::start(&pubkey);
     let res = core
         .ssh_exec(
@@ -482,7 +482,7 @@ fn import_pkcs1_rsa_key_and_auth() {
     assert_eq!(res.exit_status, 0);
 }
 
-/// Классический RSA-2048 в PKCS#1 (одноразовый тестовый ключ).
+/// Classic RSA-2048 in PKCS#1 (one-off test key).
 const RSA_PKCS1: &str = "\
 -----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEA0Nz6qk+yFoEL3gBixnDidk4jLEIvDk25O5yTpEMmmIHa/o8x
@@ -559,10 +559,10 @@ fn interactive_pty_session() {
         )
         .unwrap();
 
-    // вводим команду в интерактивный shell
+    // enter a command into the interactive shell
     session.write(b"echo pty-works\n".to_vec()).unwrap();
 
-    // ждём появления вывода в observer (до ~3с)
+    // wait for output to appear in the observer (up to ~3s)
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if contains(&observer.buf.lock().unwrap(), b"pty-works") {
@@ -618,7 +618,7 @@ fn known_hosts_list_and_forget() {
         .unwrap();
     let sshd = TestSshd::start(&pubkey);
 
-    // коннект закрепляет host key (TOFU)
+    // the connection pins the host key (TOFU)
     core.ssh_exec(
         "127.0.0.1".to_string(),
         sshd.port,
@@ -639,7 +639,7 @@ fn known_hosts_list_and_forget() {
         .forget_host("127.0.0.1".to_string(), sshd.port)
         .unwrap());
     assert!(core.list_known_hosts().unwrap().is_empty());
-    // повторный forget — записи уже нет
+    // repeated forget — the record is already gone
     assert!(!core
         .forget_host("127.0.0.1".to_string(), sshd.port)
         .unwrap());
@@ -647,8 +647,8 @@ fn known_hosts_list_and_forget() {
 
 #[test]
 fn password_auth_path_wired() {
-    // sshd принимает только ключи → пароль гарантированно не пройдёт, но путь
-    // password-аутентификации доходит до сервера и чисто возвращает ошибку.
+    // sshd accepts keys only → the password is guaranteed to fail, but the
+    // password-authentication path reaches the server and returns a clean error.
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -681,7 +681,7 @@ fn host_key_mismatch_detected() {
         .generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
 
-    // первый sshd → закрепляем его host key (TOFU)
+    // first sshd → pin its host key (TOFU)
     let sshd1 = TestSshd::start(&pubkey);
     let port = sshd1.port;
     core.ssh_exec(
@@ -694,7 +694,7 @@ fn host_key_mismatch_detected() {
     )
     .unwrap();
 
-    // поднимаем ДРУГОЙ sshd (другой host key) на ТОМ ЖЕ порту
+    // bring up a DIFFERENT sshd (different host key) on the SAME port
     drop(sshd1);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let _sshd2 = TestSshd::start_on_port(&pubkey, port);
@@ -722,7 +722,7 @@ fn change_password_e2e() {
     let secret = core.create_account(Some("old-pw".to_string())).unwrap();
     core.create_vault("v".to_string(), "V".to_string()).unwrap();
 
-    // меняем пароль
+    // change the password
     core.change_password(
         Some("old-pw".to_string()),
         Some("new-pw".to_string()),
@@ -730,7 +730,7 @@ fn change_password_e2e() {
     )
     .unwrap();
 
-    // старый пароль больше не открывает, новый — открывает
+    // the old password no longer unlocks, the new one does
     core.lock();
     assert!(matches!(
         core.unlock(Some("old-pw".to_string()), secret.clone()),
@@ -740,7 +740,7 @@ fn change_password_e2e() {
         .unwrap();
     assert_eq!(core.list_vaults().unwrap().len(), 1);
 
-    // неверные старые креды не «кирпичат» (ошибка, без перезаписи)
+    // wrong old credentials don't "brick" the account (error, no overwrite)
     assert!(core
         .change_password(
             Some("wrong".to_string()),
@@ -748,7 +748,7 @@ fn change_password_e2e() {
             secret.clone()
         )
         .is_err());
-    // всё ещё открывается актуальным паролем
+    // still unlocks with the current password
     core.lock();
     core.unlock(Some("new-pw".to_string()), secret).unwrap();
     assert!(core.is_unlocked());
@@ -764,20 +764,20 @@ fn get_public_key_and_item_metadata() {
         .generate_ssh_key("v".to_string(), "id".to_string())
         .unwrap();
 
-    // публичный ключ совпадает с выданным при генерации; есть отпечаток
+    // the public key matches the one returned at generation; a fingerprint is present
     let pk = core
         .get_public_key("v".to_string(), "id".to_string())
         .unwrap();
     assert_eq!(pk.openssh.trim(), generated.trim());
     assert!(pk.fingerprint.starts_with("SHA256:"));
 
-    // метаданные: временные метки проставлены, сертификата нет
+    // metadata: timestamps are set, no certificate
     let items = core.list_items("v".to_string()).unwrap();
     let it = items.iter().find(|i| i.item_id == "id").unwrap();
     assert!(it.created_at > 0 && it.updated_at > 0);
     assert!(!it.has_certificate);
 
-    // get_public_key на отсутствующем → NotFound
+    // get_public_key on a missing item → NotFound
     assert!(matches!(
         core.get_public_key("v".to_string(), "nope".to_string()),
         Err(unissh_ffi::FfiError::NotFound)
@@ -800,7 +800,7 @@ fn rename_item_e2e() {
     core.rename_item("v".to_string(), "old".to_string(), "new".to_string())
         .unwrap();
 
-    // старого нет, новый несёт тот же ключ
+    // the old one is gone, the new one carries the same key
     assert!(matches!(
         core.get_public_key("v".to_string(), "old".to_string()),
         Err(unissh_ffi::FfiError::NotFound)
@@ -810,7 +810,7 @@ fn rename_item_e2e() {
         .unwrap();
     assert_eq!(before.openssh, after.openssh);
 
-    // переименованным ключом можно подключиться
+    // the renamed key can be used to connect
     let sshd = TestSshd::start(&pubkey);
     let res = core
         .ssh_exec(
@@ -847,7 +847,7 @@ fn trust_host_e2e() {
     )
     .unwrap();
 
-    // другой host key на том же порту → mismatch с отпечатком
+    // a different host key on the same port → mismatch with a fingerprint
     drop(sshd1);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let _sshd2 = TestSshd::start_on_port(&pubkey, port);
@@ -866,13 +866,13 @@ fn trust_host_e2e() {
         other => panic!("expected HostKeyMismatch, got {other:?}"),
     };
 
-    // доверять «не тем» отпечатком нельзя
+    // trusting with the "wrong" fingerprint is not allowed
     assert!(matches!(
         core.trust_host("127.0.0.1".to_string(), port, "SHA256:bogus".to_string()),
         Err(unissh_ffi::FfiError::HostKeyMismatch { .. })
     ));
 
-    // доверяем новому ключу с подтверждённым отпечатком → дальше всё работает
+    // trust the new key with the confirmed fingerprint → everything works afterward
     let fp = core
         .trust_host("127.0.0.1".to_string(), port, presented)
         .unwrap();
@@ -893,7 +893,7 @@ fn trust_host_e2e() {
 #[test]
 fn local_forward_e2e() {
     use std::io::{Read, Write};
-    // эхо-сервер в отдельном потоке
+    // echo server in a separate thread
     let echo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let echo_port = echo.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -935,7 +935,7 @@ fn local_forward_e2e() {
     let bind = tunnel.bind_address();
     assert!(bind.starts_with("127.0.0.1:"));
 
-    // соединяемся через туннель → попадаем на эхо-сервер
+    // connect through the tunnel → land on the echo server
     let mut conn = std::net::TcpStream::connect(&bind).unwrap();
     conn.write_all(b"ping-through-tunnel").unwrap();
     let mut got = [0u8; 64];
@@ -1034,13 +1034,13 @@ fn connection_profiles_crud_and_import() {
     assert_eq!(got.jumps.len(), 1);
     assert_eq!(got.jumps[0].host, "bastion");
 
-    // профили не появляются в обычном списке как «ключи» — это отдельный тип
-    // (list_items вернёт их с item_type=3); проверим, что управление работает
+    // profiles don't show up in the regular listing as "keys" — it's a separate type
+    // (list_items returns them with item_type=3); verify that management works
     core.delete_connection("v".to_string(), "prod-web".to_string())
         .unwrap();
     assert!(core.list_connections("v".to_string()).unwrap().is_empty());
 
-    // импорт ssh-config
+    // import ssh-config
     let cfg = "Host web prod\n  HostName 192.168.1.10\n  User deploy\n  Port 2222\n\
                Host bastion\n  HostName gw.example.com\n  ProxyJump jumpuser@jump.example.com:2200\n";
     let created = core
@@ -1066,7 +1066,7 @@ fn cross_type_clobber_rejected() {
     core.generate_ssh_key("v".to_string(), "id".to_string())
         .unwrap();
 
-    // профиль соединения с id существующего ключа НЕ должен затереть ключ
+    // a connection profile with the id of an existing key must NOT overwrite the key
     let prof = unissh_ffi::ConnectionProfile {
         profile_id: "id".to_string(),
         uid: String::new(),
@@ -1083,12 +1083,12 @@ fn cross_type_clobber_rejected() {
         core.save_connection("v".to_string(), prof),
         Err(unissh_ffi::FfiError::AlreadyExists)
     ));
-    // ключ цел и читается
+    // the key is intact and readable
     assert!(core
         .get_public_key("v".to_string(), "id".to_string())
         .is_ok());
 
-    // и наоборот: генерация ключа поверх профиля отклоняется
+    // and vice versa: generating a key over a profile is rejected
     let prof2 = unissh_ffi::ConnectionProfile {
         profile_id: "conn".to_string(),
         uid: String::new(),
@@ -1107,7 +1107,7 @@ fn cross_type_clobber_rejected() {
         Err(unissh_ffi::FfiError::AlreadyExists)
     ));
 
-    // import_ssh_config с алиасом = id ключа пропускает его (не затирает)
+    // import_ssh_config with an alias = a key id skips it (does not overwrite)
     let created = core
         .import_ssh_config("v".to_string(), "Host id\n  HostName x\n".to_string())
         .unwrap();
@@ -1136,11 +1136,11 @@ fn import_ssh_config_ipv6_proxyjump() {
     assert_eq!(p.jumps[0].user, "j");
 }
 
-// --- пароли серверов в волте ---
+// --- server passwords in the vault ---
 
-/// In-process SSH-сервер (russh), принимающий пароль `password` и умеющий exec
-/// (эхо команды + код 0). Hermetic-замена sshd: системному sshd нельзя задать
-/// пароль пользователя, не трогая /etc/shadow.
+/// In-process SSH server (russh) that accepts the password `password` and can exec
+/// (echo the command + code 0). Hermetic replacement for sshd: a system sshd cannot
+/// have a user password set without touching /etc/shadow.
 mod pwserver {
     use std::sync::Arc;
 
@@ -1189,8 +1189,8 @@ mod pwserver {
         }
     }
 
-    /// Поднимает сервер на отдельном tokio-runtime; возвращает (runtime, port).
-    /// Runtime нужно держать живым, пока идёт тест.
+    /// Brings up the server on a separate tokio runtime; returns (runtime, port).
+    /// The runtime must be kept alive while the test runs.
     pub fn start(password: &str) -> (tokio::runtime::Runtime, u16) {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -1202,9 +1202,9 @@ mod pwserver {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
 
-            // host key: генерим Ed25519 через ssh-agent крейт ядра нельзя (нет
-            // зависимости тут) — берём ssh-keygen уже использующийся в тестах? Нет:
-            // russh принимает OpenSSH PEM. Сгенерим временный ключ ssh-keygen-ом.
+            // host key: we can't generate Ed25519 through the core's ssh-agent crate
+            // (no dependency here) — reuse ssh-keygen already used in the tests? No:
+            // russh accepts OpenSSH PEM. Generate a temporary key with ssh-keygen.
             let dir = tempfile::tempdir().unwrap();
             let keypath = dir.path().join("hostkey");
             let st = std::process::Command::new("ssh-keygen")
@@ -1224,7 +1224,7 @@ mod pwserver {
             });
 
             tokio::spawn(async move {
-                let _dir = dir; // держим tempdir живым
+                let _dir = dir; // keep the tempdir alive
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
@@ -1256,14 +1256,14 @@ fn password_items_crud() {
     core.save_password("v".to_string(), "srv1".to_string(), "s3cret!".to_string())
         .unwrap();
 
-    // reveal возвращает то, что положили
+    // reveal returns what was stored
     assert_eq!(
         core.get_password("v".to_string(), "srv1".to_string())
             .unwrap(),
         "s3cret!"
     );
 
-    // в списке items — тип «пароль» (4), версия растёт при обновлении
+    // in the items listing — type "password" (4), the version grows on update
     let items = core.list_items("v".to_string()).unwrap();
     let it = items.iter().find(|i| i.item_id == "srv1").unwrap();
     assert_eq!(it.item_type, 4);
@@ -1278,9 +1278,9 @@ fn password_items_crud() {
     );
     let items = core.list_items("v".to_string()).unwrap();
     let it = items.iter().find(|i| i.item_id == "srv1").unwrap();
-    assert!(it.version > v1, "версия должна монотонно расти");
+    assert!(it.version > v1, "version must grow monotonically");
 
-    // удаление (tombstone) → NotFound
+    // deletion (tombstone) → NotFound
     core.delete_item("v".to_string(), "srv1".to_string())
         .unwrap();
     assert!(matches!(
@@ -1291,7 +1291,7 @@ fn password_items_crud() {
 
 #[test]
 fn get_password_refuses_non_password_items() {
-    // Критично: через reveal-путь нельзя вытащить приватный ключ или иной item.
+    // Critical: the reveal path must not expose a private key or any other item.
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -1304,9 +1304,9 @@ fn get_password_refuses_non_password_items() {
         .unwrap_err();
     assert!(
         !matches!(err, unissh_ffi::FfiError::NotFound),
-        "ожидалась ошибка типа, не NotFound"
+        "expected a type error, not NotFound"
     );
-    // и наоборот: пароль не притворяется ключом
+    // and vice versa: a password does not masquerade as a key
     core.save_password("v".to_string(), "pw".to_string(), "x".to_string())
         .unwrap();
     assert!(core
@@ -1323,7 +1323,7 @@ fn cross_type_clobber_password_rejected() {
     core.generate_ssh_key("v".to_string(), "id".to_string())
         .unwrap();
 
-    // пароль с id существующего ключа НЕ должен затереть ключ
+    // a password with the id of an existing key must NOT overwrite the key
     assert!(matches!(
         core.save_password("v".to_string(), "id".to_string(), "x".to_string()),
         Err(unissh_ffi::FfiError::AlreadyExists)
@@ -1358,9 +1358,9 @@ fn connect_with_vault_password() {
         )
         .unwrap();
     assert_eq!(res.exit_status, 0);
-    assert_eq!(res.stdout.trim(), "echo vault-pw"); // тест-сервер эхает команду
+    assert_eq!(res.stdout.trim(), "echo vault-pw"); // the test server echoes the command
 
-    // неверная ссылка → NotFound ещё до коннекта
+    // a bad reference → NotFound even before connecting
     assert!(matches!(
         core.ssh_exec(
             "127.0.0.1".to_string(),
@@ -1376,7 +1376,7 @@ fn connect_with_vault_password() {
         Err(unissh_ffi::FfiError::NotFound)
     ));
 
-    // удалённый (tombstone) пароль тоже не годится
+    // a deleted (tombstone) password is also not acceptable
     core.delete_item("v".to_string(), "srv".to_string())
         .unwrap();
     assert!(matches!(
@@ -1402,7 +1402,7 @@ fn profile_with_vault_password_and_inline_jump_rejection() {
     core.create_account(None).unwrap();
     core.create_vault("v".to_string(), "V".to_string()).unwrap();
 
-    // профиль со ссылкой на пароль + jump по паролю из волта
+    // a profile referencing a password + a jump using a password from the vault
     let prof = unissh_ffi::ConnectionProfile {
         profile_id: "pw-host".to_string(),
         uid: String::new(),
@@ -1440,7 +1440,7 @@ fn profile_with_vault_password_and_inline_jump_rejection() {
         AuthMethod::VaultPassword { password_item_id, .. } if password_item_id == "bastion-pw"
     ));
 
-    // inline-пароль в jump-хосте профиля — отказ (секрет не пишется в JSON)
+    // inline password in the profile's jump host — rejected (secret not written to JSON)
     let bad = unissh_ffi::ConnectionProfile {
         profile_id: "bad".to_string(),
         uid: String::new(),
@@ -1492,11 +1492,11 @@ fn password_never_stored_in_plaintext() {
     );
 }
 
-// --- fleet-hardening: лимит конкуренции, таймаут, тайминг ---
+// --- fleet-hardening: concurrency limit, timeout, timing ---
 
-/// Конфигурируемый in-process SSH-сервер для fleet-тестов: парольный auth + exec,
-/// поведение exec настраивается (мгновенно/со сном/зависание), плюс общий счётчик
-/// одновременных exec для проверки лимита конкуренции.
+/// Configurable in-process SSH server for fleet tests: password auth + exec,
+/// exec behavior is configurable (instant/with sleep/hang), plus a shared counter
+/// of concurrent execs for testing the concurrency limit.
 mod fleetserver {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1507,13 +1507,13 @@ mod fleetserver {
 
     #[derive(Clone, Copy)]
     pub enum Mode {
-        /// Поспать N мс на стороне сервера, затем echo + exit 0.
+        /// Sleep N ms on the server side, then echo + exit 0.
         Sleep(u64),
-        /// channel_success, но никогда не отвечать (завис хост).
+        /// channel_success, but never reply (hung host).
         Hang,
     }
 
-    /// Счётчики одновременных exec (для проверки потолка конкуренции).
+    /// Counters of concurrent execs (for testing the concurrency ceiling).
     #[derive(Default)]
     pub struct Counters {
         current: AtomicUsize,
@@ -1563,7 +1563,7 @@ mod fleetserver {
                 Mode::Sleep(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
                 Mode::Hang => {
                     self.counters.current.fetch_sub(1, Ordering::SeqCst);
-                    return Ok(()); // канал открыт, ответа нет — клиент должен сам отвалиться по таймауту
+                    return Ok(()); // channel is open, no reply — the client must time out on its own
                 }
             }
             self.counters.current.fetch_sub(1, Ordering::SeqCst);
@@ -1663,12 +1663,12 @@ fn multi_exec_timeout_marks_timed_out() {
         Arc::new(fleetserver::Counters::default()),
     );
 
-    // exec зависает на сервере; per-host timeout=1с должен пометить результат и вернуть управление.
+    // exec hangs on the server; a per-host timeout=1s must flag the result and return control.
     let results = core
         .ssh_exec_multi(vec![pw_target(port)], "echo hi".to_string(), 0, 1)
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].timed_out, "ожидался timed_out=true");
+    assert!(results[0].timed_out, "expected timed_out=true");
     assert!(results[0].error.is_some());
     assert_eq!(results[0].exit_status, -1);
 }
@@ -1681,7 +1681,7 @@ fn multi_exec_concurrency_is_capped() {
     let counters = Arc::new(fleetserver::Counters::default());
     let (_rt, port) = fleetserver::start("pw", fleetserver::Mode::Sleep(200), counters.clone());
 
-    // 5 целей на тот же порт, лимит 2 → одновременно выполняется не больше 2.
+    // 5 targets on the same port, limit 2 → no more than 2 run concurrently.
     let targets: Vec<_> = (0..5).map(|_| pw_target(port)).collect();
     let results = core
         .ssh_exec_multi(targets, "echo hi".to_string(), 2, 0)
@@ -1691,13 +1691,13 @@ fn multi_exec_concurrency_is_capped() {
         assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
         assert!(
             r.duration_ms >= 150,
-            "sleep(200) → duration должна быть ~200мс, got {}",
+            "sleep(200) → duration should be ~200ms, got {}",
             r.duration_ms
         );
     }
     assert!(
         counters.peak() <= 2,
-        "пик одновременных exec {} превысил лимит 2",
+        "peak concurrent execs {} exceeded the limit of 2",
         counters.peak()
     );
 }
@@ -1720,7 +1720,7 @@ fn secure_notes_crud() {
         note
     );
 
-    // тип 6, версия растёт при обновлении
+    // type 6, the version grows on update
     let items = core.list_items("v".to_string()).unwrap();
     let it = items.iter().find(|i| i.item_id == "host-notes").unwrap();
     assert_eq!(it.item_type, 6);
@@ -1741,7 +1741,7 @@ fn secure_notes_crud() {
             > v1
     );
 
-    // удаление → NotFound
+    // deletion → NotFound
     core.delete_item("v".to_string(), "host-notes".to_string())
         .unwrap();
     assert!(matches!(
@@ -1752,7 +1752,7 @@ fn secure_notes_crud() {
 
 #[test]
 fn get_note_is_type_gated() {
-    // заметка и пароль не подменяют друг друга; ключ через get_note не достать.
+    // a note and a password don't substitute for each other; a key can't be pulled via get_note.
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -1764,7 +1764,7 @@ fn get_note_is_type_gated() {
     core.save_note("v".to_string(), "note".to_string(), "hello".to_string())
         .unwrap();
 
-    // get_note на ключе/пароле → не NotFound, а ошибка типа
+    // get_note on a key/password → not NotFound, but a type error
     let e = core
         .get_note("v".to_string(), "key".to_string())
         .unwrap_err();
@@ -1773,7 +1773,7 @@ fn get_note_is_type_gated() {
         .get_note("v".to_string(), "pw".to_string())
         .unwrap_err();
     assert!(!matches!(e, unissh_ffi::FfiError::NotFound));
-    // get_password на заметке → ошибка
+    // get_password on a note → error
     assert!(core
         .get_password("v".to_string(), "note".to_string())
         .is_err());
@@ -1796,7 +1796,7 @@ fn note_never_stored_in_plaintext() {
     );
 }
 
-// --- теги профилей: выборка целей + exec по тегам ---
+// --- profile tags: target selection + exec by tags ---
 
 fn save_profile(core: &Core, id: &str, host: &str, port: u16, key_item: &str, tags: &[&str]) {
     core.save_connection(
@@ -1839,7 +1839,7 @@ fn select_targets_by_tags_filters() {
     hosts.sort();
     assert_eq!(hosts, vec!["10.0.0.1", "10.0.0.2"]);
 
-    // all: prod+web → только web1
+    // all: prod+web → only web1
     let all = core
         .select_targets_by_tags(
             "v".to_string(),
@@ -1850,16 +1850,16 @@ fn select_targets_by_tags_filters() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].host, "10.0.0.1");
 
-    // пустой запрос → ничего
+    // empty query → nothing
     assert!(core
         .select_targets_by_tags("v".to_string(), vec![], false)
         .unwrap()
         .is_empty());
 }
 
-/// #12 (B4.3): select_targets_by_tags ИСКЛЮЧАЕТ PromptPassword-хосты — нет
-/// заранее известного пароля, в fan-out они не идут. Регрессия на дыру, которую
-/// закрывал B4.3, но которую не покрывал тест (все прежние профили были key-auth).
+/// #12 (B4.3): select_targets_by_tags EXCLUDES PromptPassword hosts — there is no
+/// pre-known password, so they don't go into the fan-out. Regression on a gap that
+/// B4.3 closed but the test didn't cover (all prior profiles were key-auth).
 #[test]
 fn select_targets_by_tags_excludes_prompt_password() {
     let dir = tempfile::tempdir().unwrap();
@@ -1869,7 +1869,7 @@ fn select_targets_by_tags_excludes_prompt_password() {
     core.generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
     save_profile(&core, "web1", "10.0.0.1", 22, "key", &["web"]);
-    // PromptPassword-хост с тем же тегом — должен быть отфильтрован.
+    // PromptPassword host with the same tag — must be filtered out.
     core.save_connection(
         "v".to_string(),
         unissh_ffi::ConnectionProfile {
@@ -1894,7 +1894,7 @@ fn select_targets_by_tags_excludes_prompt_password() {
     assert_eq!(
         hosts,
         vec!["10.0.0.1"],
-        "PromptPassword-хост исключён из tag-fan-out (#12)"
+        "PromptPassword host excluded from tag fan-out (#12)"
     );
 }
 
@@ -1926,7 +1926,7 @@ fn ssh_exec_by_tags_runs_on_matching() {
     assert_eq!(results[0].stdout.trim(), "tagged");
 }
 
-// --- группы хостов (вложенные) ---
+// --- host groups (nested) ---
 
 fn group(id: &str, members: &[&str], parent: Option<&str>) -> unissh_ffi::ServerGroup {
     unissh_ffi::ServerGroup {
@@ -1951,7 +1951,7 @@ fn host_group_crud_and_tombstone() {
     assert_eq!(g.member_ids, vec!["web1", "web2"]);
     assert!(g.parent_id.is_none());
 
-    // тип 5, версия растёт
+    // type 5, the version grows
     let items = core.list_items("v".to_string()).unwrap();
     let it = items.iter().find(|i| i.item_id == "prod").unwrap();
     assert_eq!(it.item_type, 5);
@@ -1965,7 +1965,7 @@ fn host_group_crud_and_tombstone() {
 
     assert_eq!(core.list_groups("v".to_string()).unwrap().len(), 1);
 
-    // tombstone → NotFound, list не видит
+    // tombstone → NotFound, list doesn't see it
     core.delete_group("v".to_string(), "prod".to_string())
         .unwrap();
     assert!(matches!(
@@ -1984,7 +1984,7 @@ fn group_validation_and_clobber() {
     core.generate_ssh_key("v".to_string(), "id".to_string())
         .unwrap();
 
-    // само-членство / само-родительство / пустой id → ошибка
+    // self-membership / self-parenting / empty id → error
     assert!(core
         .save_group("v".to_string(), group("g", &["g"], None))
         .is_err());
@@ -1995,7 +1995,7 @@ fn group_validation_and_clobber() {
         .save_group("v".to_string(), group("", &[], None))
         .is_err());
 
-    // кросс-тип клоббер: группа с id существующего ключа → AlreadyExists, ключ цел
+    // cross-type clobber: a group with the id of an existing key → AlreadyExists, key intact
     assert!(matches!(
         core.save_group("v".to_string(), group("id", &[], None)),
         Err(unissh_ffi::FfiError::AlreadyExists)
@@ -2007,7 +2007,7 @@ fn group_validation_and_clobber() {
 
 #[test]
 fn group_serde_forward_compat() {
-    // группа без parent_id/color (минимальный JSON) читается
+    // a group without parent_id/color (minimal JSON) is read
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -2032,7 +2032,7 @@ fn ssh_exec_group_runs_nested() {
     save_profile(&core, "p1", "127.0.0.1", sshd.port, "key", &[]);
     save_profile(&core, "p2", "127.0.0.1", sshd.port, "key", &[]);
 
-    // A → [p1, B]; B → [p2]  (вложенность)
+    // A → [p1, B]; B → [p2]  (nesting)
     core.save_group("v".to_string(), group("B", &["p2"], None))
         .unwrap();
     core.save_group("v".to_string(), group("A", &["p1", "B"], None))
@@ -2047,7 +2047,7 @@ fn ssh_exec_group_runs_nested() {
             0,
         )
         .unwrap();
-    assert_eq!(results.len(), 2, "вложенная группа должна дать 2 хоста");
+    assert_eq!(results.len(), 2, "a nested group should yield 2 hosts");
     for r in &results {
         assert!(r.error.is_none(), "err: {:?}", r.error);
         assert_eq!(r.stdout.trim(), "grp");
@@ -2082,7 +2082,7 @@ fn dry_run_group_reports_statuses() {
     core.create_vault("v".to_string(), "V".to_string()).unwrap();
     core.generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
-    // ok-профиль (ключ), prompt-профиль (PromptPassword), и висячая ссылка
+    // ok profile (key), prompt profile (PromptPassword), and a dangling reference
     save_profile(&core, "ok1", "10.0.0.1", 22, "key", &[]);
     core.save_connection(
         "v".to_string(),
@@ -2116,7 +2116,7 @@ fn dry_run_group_reports_statuses() {
         Some(unissh_ffi::ResolveStatus::PromptPassword)
     );
     assert_eq!(status("ghost"), Some(unissh_ffi::ResolveStatus::Dangling));
-    // ok1 зарезолвился с реальным хостом
+    // ok1 resolved to a real host
     assert_eq!(
         plans.iter().find(|p| p.member_id == "ok1").unwrap().host,
         "10.0.0.1"
@@ -2135,7 +2135,7 @@ fn ssh_exec_group_marks_dangling_and_cycle() {
     let sshd = TestSshd::start(&pubkey);
     save_profile(&core, "p1", "127.0.0.1", sshd.port, "key", &[]);
 
-    // цикл A→B→A + висячий член; p1 валиден и должен выполниться один раз
+    // cycle A→B→A + a dangling member; p1 is valid and must run once
     core.save_group("v".to_string(), group("A", &["p1", "B", "ghost"], None))
         .unwrap();
     core.save_group("v".to_string(), group("B", &["A"], None))
@@ -2150,19 +2150,19 @@ fn ssh_exec_group_marks_dangling_and_cycle() {
             0,
         )
         .unwrap();
-    // ровно один успешный (p1), плюс error-маркеры для ghost и цикла
+    // exactly one success (p1), plus error markers for ghost and the cycle
     let ok: Vec<_> = results.iter().filter(|r| r.error.is_none()).collect();
     assert_eq!(ok.len(), 1);
     assert_eq!(ok[0].stdout.trim(), "ok");
     assert!(results
         .iter()
         .any(|r| r.host == "ghost" && r.error.is_some()));
-    // и маркер цикла (член-группа B уже посещена → ссылка на A помечена ошибкой)
+    // and the cycle marker (member-group B already visited → the reference to A is flagged as an error)
     assert!(
         results
             .iter()
             .any(|r| r.error.as_deref().is_some_and(|e| e.contains("cycle"))),
-        "ожидался error-маркер цикла; got: {:?}",
+        "expected a cycle error marker; got: {:?}",
         results
             .iter()
             .map(|r| (&r.host, &r.error))
@@ -2170,7 +2170,7 @@ fn ssh_exec_group_marks_dangling_and_cycle() {
     );
 }
 
-// --- hardening ресайза терминала ---
+// --- terminal-resize hardening ---
 
 #[test]
 fn resize_changes_terminal_size() {
@@ -2203,14 +2203,14 @@ fn resize_changes_terminal_size() {
         )
         .unwrap();
 
-    // ресайз → window_change; проверяем фактический размер PTY через stty size
+    // resize → window_change; verify the actual PTY size via stty size
     session.resize(120, 40).unwrap();
     std::thread::sleep(Duration::from_millis(200));
     session.write(b"stty size\n".to_vec()).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        // stty size печатает "rows cols" → "40 120" (оси не перепутаны)
+        // stty size prints "rows cols" → "40 120" (axes not swapped)
         if contains(&observer.buf.lock().unwrap(), b"40 120") {
             break;
         }
@@ -2223,7 +2223,7 @@ fn resize_changes_terminal_size() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // нулевой размер отвергается на FFI-границе (мусор не уходит на сервер)
+    // zero size is rejected at the FFI boundary (garbage doesn't reach the server)
     assert!(session.resize(0, 40).is_err());
     assert!(session.resize(120, 0).is_err());
 
@@ -2232,8 +2232,8 @@ fn resize_changes_terminal_size() {
 
 #[test]
 fn open_session_rejects_zero_size() {
-    // Реальный sshd: без валидации open_session(cols=0) бы УСПЕШНО подключился.
-    // Значит is_err() ловит именно валидацию размера, а не отказ коннекта.
+    // Real sshd: without validation, open_session(cols=0) would connect SUCCESSFULLY.
+    // So is_err() catches the size validation specifically, not a connection failure.
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
@@ -2257,10 +2257,10 @@ fn open_session_rejects_zero_size() {
         24,
         observer,
     );
-    assert!(r.is_err(), "нулевая ширина должна отвергаться валидацией");
+    assert!(r.is_err(), "zero width must be rejected by validation");
 }
 
-// --- аудит целостности волта (verify_chain) ---
+// --- vault integrity audit (verify_chain) ---
 
 #[test]
 fn verify_vault_integrity_ok() {
@@ -2283,7 +2283,7 @@ fn verify_vault_integrity_ok() {
     assert!(report.checked >= 4);
 }
 
-// --- экспорт ~/.ssh/config из волта ---
+// --- exporting ~/.ssh/config from the vault ---
 
 #[test]
 fn export_ssh_config_round_trips() {
@@ -2302,7 +2302,7 @@ fn export_ssh_config_round_trips() {
     assert!(exported.contains("Port 2222"));
     assert!(exported.contains("ProxyJump jumpuser@jump.example.com:2200"));
 
-    // round-trip: импорт экспортированного в свежий волт даёт те же профили
+    // round-trip: importing the export into a fresh vault yields the same profiles
     core.create_vault("v2".to_string(), "V2".to_string())
         .unwrap();
     core.import_ssh_config("v2".to_string(), exported).unwrap();
@@ -2321,7 +2321,7 @@ fn export_ssh_config_round_trips() {
     assert_eq!(gw.jumps[0].user, "jumpuser");
 }
 
-// --- импорт ~/.ssh/known_hosts ---
+// --- importing ~/.ssh/known_hosts ---
 
 #[test]
 fn import_known_hosts_pins_and_skips_hashed() {
@@ -2329,7 +2329,7 @@ fn import_known_hosts_pins_and_skips_hashed() {
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
     core.create_vault("v".to_string(), "V".to_string()).unwrap();
-    // настоящий ed25519-публичный ключ
+    // a real ed25519 public key
     let pubkey = core
         .generate_ssh_key("v".to_string(), "k".to_string())
         .unwrap();
@@ -2349,14 +2349,14 @@ fn import_known_hosts_pins_and_skips_hashed() {
         .any(|h| h.host == "example.com" && h.port == 22));
     assert!(hosts.iter().any(|h| h.host == "10.0.0.1" && h.port == 2222));
 
-    // повторный импорт идемпотентен (UPSERT) — число известных хостов не растёт
+    // repeated import is idempotent (UPSERT) — the number of known hosts doesn't grow
     let before = core.list_known_hosts().unwrap().len();
     core.import_known_hosts(format!("example.com {pubkey}\n"))
         .unwrap();
     assert_eq!(core.list_known_hosts().unwrap().len(), before);
 }
 
-// --- проверка консистентности БД ---
+// --- DB consistency check ---
 
 #[test]
 fn check_consistency_ok() {
@@ -2372,7 +2372,7 @@ fn check_consistency_ok() {
     assert!(report.issues.is_empty());
 }
 
-// --- fleet push: раскладка файла на много хостов через SFTP ---
+// --- fleet push: distributing a file to many hosts via SFTP ---
 
 fn key_target(port: u16) -> MultiExecTarget {
     MultiExecTarget {
@@ -2425,7 +2425,7 @@ fn sftp_put_multi_makes_parent_dirs() {
 
     let path = dir.path().join("nested").join("file.bin");
     let data = b"in-subdir".to_vec();
-    // первый раз: создаёт родителя
+    // first time: creates the parent
     let r1 = core
         .sftp_put_multi(
             vec![key_target(sshd.port)],
@@ -2439,7 +2439,7 @@ fn sftp_put_multi_makes_parent_dirs() {
     assert!(r1[0].error.is_none(), "err: {:?}", r1[0].error);
     assert_eq!(std::fs::read(&path).unwrap(), data);
 
-    // второй раз: родитель уже есть, mkdir-ошибка проглатывается
+    // second time: the parent already exists, the mkdir error is swallowed
     let r2 = core
         .sftp_put_multi(
             vec![key_target(sshd.port)],
@@ -2453,7 +2453,7 @@ fn sftp_put_multi_makes_parent_dirs() {
     assert!(r2[0].error.is_none(), "err: {:?}", r2[0].error);
 }
 
-// --- broadcast-сессия (cluster-ssh): один ввод → много PTY ---
+// --- broadcast session (cluster-ssh): one input → many PTYs ---
 
 struct BcastObserver {
     bufs: std::sync::Mutex<std::collections::HashMap<u32, Vec<u8>>>,
@@ -2499,7 +2499,7 @@ fn broadcast_fans_out_input() {
     assert_eq!(st.len(), 2);
     assert!(st.iter().all(|s| s.connected), "statuses: {:?}", st);
 
-    // один write_all уходит на оба хоста
+    // a single write_all goes to both hosts
     session.write_all(b"echo bcast-hi\n".to_vec()).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(4);
@@ -2526,7 +2526,7 @@ fn broadcast_fans_out_input() {
     session.close();
 }
 
-// --- streaming exec (раздельные stdout/stderr + код возврата) ---
+// --- streaming exec (separate stdout/stderr + return code) ---
 
 struct StreamObs {
     out: std::sync::Mutex<Vec<u8>>,
@@ -2584,7 +2584,7 @@ fn ssh_exec_stream_streams_and_reports_exit() {
     handle.close().unwrap();
 }
 
-// --- возобновляемый SFTP с прогрессом и отменой ---
+// --- resumable SFTP with progress and cancellation ---
 
 #[derive(Default)]
 struct ProgObs {
@@ -2618,13 +2618,13 @@ fn sftp_upload_download_resume_and_cancel() {
         )
         .unwrap();
 
-    // источник ~100КБ (несколько чанков по 32КБ)
+    // source ~100KB (several 32KB chunks)
     let content: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
     let src = dir.path().join("src.bin");
     std::fs::write(&src, &content).unwrap();
     let remote = dir.path().join("remote.bin");
 
-    // upload с прогрессом
+    // upload with progress
     let prog = Arc::new(ProgObs::default());
     let done = sftp
         .sftp_upload(
@@ -2639,14 +2639,14 @@ fn sftp_upload_download_resume_and_cancel() {
     assert_eq!(std::fs::read(&remote).unwrap(), content);
     assert_eq!(prog.last.lock().unwrap().0, content.len() as u64);
 
-    // download целиком
+    // download in full
     let dl = dir.path().join("dl.bin");
     let done = sftp
         .sftp_download(
             remote.to_str().unwrap().to_string(),
             dl.to_str().unwrap().to_string(),
             0,
-            None, // known_size: ядро сделает stat само
+            None, // known_size: the core will stat by itself
             None,
             None,
         )
@@ -2654,7 +2654,7 @@ fn sftp_upload_download_resume_and_cancel() {
     assert!(done);
     assert_eq!(std::fs::read(&dl).unwrap(), content);
 
-    // resume download: предзаполнить первые 40000 байт, докачать остаток
+    // resume download: pre-fill the first 40000 bytes, fetch the rest
     let resume = dir.path().join("resume.bin");
     std::fs::write(&resume, &content[..40_000]).unwrap();
     let done = sftp
@@ -2662,7 +2662,7 @@ fn sftp_upload_download_resume_and_cancel() {
             remote.to_str().unwrap().to_string(),
             resume.to_str().unwrap().to_string(),
             40_000,
-            Some(content.len() as u64), // known_size: пропустить stat (докачка папки)
+            Some(content.len() as u64), // known_size: skip the stat (directory resume)
             None,
             None,
         )
@@ -2670,7 +2670,7 @@ fn sftp_upload_download_resume_and_cancel() {
     assert!(done);
     assert_eq!(std::fs::read(&resume).unwrap(), content);
 
-    // отмена: токен отменён заранее → не завершается
+    // cancellation: the token is cancelled up front → does not complete
     let token = unissh_ffi::CancelToken::new();
     token.cancel();
     let cancelled = dir.path().join("cancelled.bin");
@@ -2687,7 +2687,7 @@ fn sftp_upload_download_resume_and_cancel() {
     assert!(!done, "cancelled download must not report completion");
 }
 
-// --- авто-reconnect интерактивной сессии ---
+// --- auto-reconnect of an interactive session ---
 
 #[test]
 fn reconnecting_session_reconnects_and_works() {
@@ -2723,7 +2723,7 @@ fn reconnecting_session_reconnects_and_works() {
         .unwrap();
     assert!(session.is_connected());
 
-    // явный реконнект пересоздаёт рабочую PTY-сессию (новый TOFU, реролв кред)
+    // an explicit reconnect recreates a working PTY session (new TOFU, re-resolved creds)
     session.reconnect().unwrap();
     session.write(b"echo recon-OK\n".to_vec()).unwrap();
 
@@ -2752,7 +2752,7 @@ fn reconnecting_session_fails_after_retries() {
         buf: std::sync::Mutex::new(Vec::new()),
         closed: std::sync::atomic::AtomicBool::new(false),
     });
-    // на этот порт никто не слушает → коннект исчерпает попытки и вернёт ошибку
+    // nobody listens on this port → the connect exhausts its attempts and returns an error
     let dead = free_port();
     let r = core.open_reconnecting_session(
         "127.0.0.1".to_string(),
@@ -2770,7 +2770,7 @@ fn reconnecting_session_fails_after_retries() {
     assert!(r.is_err());
 }
 
-// --- импорт PuTTY-сессий (.reg) ---
+// --- importing PuTTY sessions (.reg) ---
 
 #[test]
 fn import_putty_sessions_creates_profiles() {
@@ -2779,7 +2779,7 @@ fn import_putty_sessions_creates_profiles() {
     core.create_account(None).unwrap();
     core.create_vault("v".to_string(), "V".to_string()).unwrap();
 
-    // имя сессии "prod web" url-кодируется как prod%20web; порт dword (0x16=22, 0x935=2357)
+    // the session name "prod web" is url-encoded as prod%20web; port dword (0x16=22, 0x935=2357)
     let reg = "Windows Registry Editor Version 5.00\r\n\r\n\
         [HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\prod%20web]\r\n\
         \"HostName\"=\"10.0.0.5\"\r\n\
@@ -2792,7 +2792,7 @@ fn import_putty_sessions_creates_profiles() {
     let report = core
         .import_putty_sessions("v".to_string(), reg.to_string())
         .unwrap();
-    // ssh-сессия создана, telnet — пропущена
+    // the ssh session is created, telnet is skipped
     assert_eq!(report.created_ids, vec!["prod web"]);
     assert_eq!(report.skipped, 1);
 
@@ -2804,7 +2804,7 @@ fn import_putty_sessions_creates_profiles() {
     assert_eq!(p.user, "deploy");
 }
 
-// --- история версий секретов через FFI ---
+// --- secret version history through FFI ---
 
 #[test]
 fn password_version_history_reveal_and_delete() {
@@ -2841,14 +2841,14 @@ fn password_version_history_reveal_and_delete() {
         "p3"
     );
 
-    // type-gate: версия ключа через reveal пароля не достаётся
+    // type-gate: a key's version can't be pulled via the password reveal
     core.generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
     assert!(core
         .get_password_version("v".to_string(), "key".to_string(), 1)
         .is_err());
 
-    // удаление чистит историю
+    // deletion clears the history
     core.delete_item("v".to_string(), "pw".to_string()).unwrap();
     assert!(core
         .list_item_versions("v".to_string(), "pw".to_string())
@@ -2856,11 +2856,11 @@ fn password_version_history_reveal_and_delete() {
         .is_empty());
 }
 
-// --- зашифрованный бэкап/экспорт волта ---
+// --- encrypted vault backup/export ---
 
 #[test]
 fn vault_backup_export_import_round_trip() {
-    // инстанс A
+    // instance A
     let dir_a = tempfile::tempdir().unwrap();
     let core_a = new_core(dir_a.path());
     core_a.create_account(None).unwrap();
@@ -2886,7 +2886,7 @@ fn vault_backup_export_import_round_trip() {
         .unwrap();
     assert!(!backup.is_empty());
 
-    // инстанс B (свежий) — восстановление в волт "restored"
+    // instance B (fresh) — restore into vault "restored"
     let dir_b = tempfile::tempdir().unwrap();
     let core_b = new_core(dir_b.path());
     core_b.create_account(None).unwrap();
@@ -2898,7 +2898,7 @@ fn vault_backup_export_import_round_trip() {
         )
         .unwrap();
 
-    // секреты восстановлены
+    // secrets restored
     assert_eq!(
         core_b
             .get_password("restored".to_string(), "pw".to_string())
@@ -2911,7 +2911,7 @@ fn vault_backup_export_import_round_trip() {
             .unwrap(),
         "secret-note"
     );
-    // приватный ключ восстановлен (публичный ключ совпадает с исходным)
+    // the private key is restored (the public key matches the original)
     assert_eq!(
         core_b
             .get_public_key("restored".to_string(), "key".to_string())
@@ -2920,12 +2920,12 @@ fn vault_backup_export_import_round_trip() {
         pub_a
     );
 
-    // неверная passphrase → ошибка
+    // wrong passphrase → error
     assert!(core_b
         .import_vault(backup.clone(), "wrong-pass".to_string(), "x".to_string())
         .is_err());
 
-    // порча бэкапа → ошибка
+    // corrupted backup → error
     let mut tampered = backup.clone();
     let n = tampered.len();
     tampered[n - 1] ^= 0x01;
@@ -2934,7 +2934,7 @@ fn vault_backup_export_import_round_trip() {
         .is_err());
 }
 
-// --- регрессии по ревью ---
+// --- review regressions ---
 
 #[test]
 fn sftp_download_rejects_offset_beyond_size() {
@@ -2969,7 +2969,7 @@ fn sftp_download_rejects_offset_beyond_size() {
     )
     .unwrap();
 
-    // offset за концом remote (3 байта) → ошибка, не «успех» с битым файлом
+    // offset past the end of remote (3 bytes) → error, not a "success" with a corrupt file
     let dl = dir.path().join("dl.bin");
     assert!(sftp
         .sftp_download(
@@ -2983,9 +2983,9 @@ fn sftp_download_rejects_offset_beyond_size() {
         .is_err());
 }
 
-// Пул каналов: больше одновременных передач, чем каналов (8 > K=4), в разных
-// потоках. Проверяет конкурентную аренду/возврат канала под насыщением (4 ждут
-// освобождения), отсутствие дедлока и корректность содержимого каждого файла.
+// Channel pool: more concurrent transfers than channels (8 > K=4), across different
+// threads. Verifies concurrent channel lease/return under saturation (4 wait for
+// release), absence of deadlock, and correctness of each file's contents.
 #[test]
 fn sftp_pool_parallel_downloads() {
     use std::sync::Arc;
@@ -3004,11 +3004,11 @@ fn sftp_pool_parallel_downloads() {
             "root".to_string(),
             agent_auth("v", "key"),
             vec![],
-            4, // K=4 каналов, а файлов ниже — 8
+            4, // K=4 channels, but there are 8 files below
         )
         .unwrap();
 
-    // 8 файлов с различимым содержимым; заливаем последовательно.
+    // 8 files with distinguishable contents; upload sequentially.
     let n = 8usize;
     let remotes: Vec<(String, Vec<u8>)> = (0..n)
         .map(|i| {
@@ -3030,7 +3030,7 @@ fn sftp_pool_parallel_downloads() {
         })
         .collect();
 
-    // Скачиваем все параллельно — по потоку на файл; leases > каналов.
+    // Download them all in parallel — one thread per file; leases > channels.
     let sftp = Arc::new(sftp);
     let handles: Vec<_> = remotes
         .into_iter()
@@ -3059,10 +3059,10 @@ fn sftp_pool_parallel_downloads() {
     }
 }
 
-// Регрессия: сервер с `MaxSessions 1` отклоняет второй канал
-// (`AdministrativelyProhibited`). Пул, запрошенный на K=4, должен УЖАТЬСЯ до 1 и
-// переиспользовать единственный канал, а не ронять передачи. Раньше параллельная
-// выгрузка падала бы с ошибкой открытия канала.
+// Regression: a server with `MaxSessions 1` refuses the second channel
+// (`AdministrativelyProhibited`). A pool requested at K=4 must SHRINK to 1 and
+// reuse the single channel rather than dropping transfers. Previously a parallel
+// upload would fail with a channel-open error.
 #[test]
 fn sftp_pool_degrades_on_max_sessions() {
     use std::sync::Arc;
@@ -3081,7 +3081,7 @@ fn sftp_pool_degrades_on_max_sessions() {
             "root".to_string(),
             agent_auth("v", "key"),
             vec![],
-            4, // запрашиваем 4, но сервер разрешит только 1
+            4, // request 4, but the server will allow only 1
         )
         .unwrap();
 
@@ -3106,7 +3106,7 @@ fn sftp_pool_degrades_on_max_sessions() {
         })
         .collect();
 
-    // Параллельные скачивания: пул отклонит доп. каналы и переиспользует один.
+    // Parallel downloads: the pool will reject extra channels and reuse one.
     let sftp = Arc::new(sftp);
     let handles: Vec<_> = remotes
         .into_iter()
@@ -3156,9 +3156,9 @@ fn import_vault_rejects_used_vault_id() {
     core_b
         .import_vault(backup.clone(), "pass".to_string(), "restored".to_string())
         .unwrap();
-    // удаляем — id остаётся занятым tombstone'ом
+    // delete it — the id stays occupied by a tombstone
     core_b.delete_vault("restored".to_string()).unwrap();
-    // повторный импорт в тот же id → ясная ошибка, не порча
+    // re-importing into the same id → a clear error, not corruption
     assert!(matches!(
         core_b.import_vault(backup, "pass".to_string(), "restored".to_string()),
         Err(unissh_ffi::FfiError::AlreadyExists)
@@ -3177,7 +3177,7 @@ fn backup_tampered_kdf_params_fail() {
         .export_vault("v".to_string(), "pass".to_string())
         .unwrap();
 
-    // байт внутри kdf_blob (после magic(4)+version(1)+len(4)) — теперь покрыт AAD
+    // a byte inside kdf_blob (after magic(4)+version(1)+len(4)) — now covered by AAD
     let mut tampered = backup.clone();
     tampered[12] ^= 0x01;
     let dir2 = tempfile::tempdir().unwrap();
@@ -3205,7 +3205,7 @@ fn import_putty_skips_existing_profile() {
         .unwrap();
     assert!(report.created_ids.is_empty());
     assert_eq!(report.skipped, 1);
-    // существующий профиль НЕ перезаписан
+    // the existing profile is NOT overwritten
     assert_eq!(
         core.get_connection("v".to_string(), "web".to_string())
             .unwrap()
@@ -3245,7 +3245,7 @@ fn reconnecting_session_auto_reconnects_on_write() {
             observer.clone(),
         )
         .unwrap();
-    // рвём текущую сессию; следующий write должен сам переподключиться
+    // tear down the current session; the next write must reconnect on its own
     session.close();
     assert!(!session.is_connected());
     session.write(b"echo auto-reconnect-OK\n".to_vec()).unwrap();
@@ -3264,13 +3264,13 @@ fn reconnecting_session_auto_reconnects_on_write() {
     session.close();
 }
 
-/// Контракт границы секретов (см. module-doc `unissh-ffi`): перечисляет ЕДИНСТВЕННЫЕ
-/// методы, которым позволено возвращать секретный материал наружу, и проверяет их
-/// type-gating. Tripwire: добавил новый secret-возвращающий метод — обнови и этот
-/// тест, и module-doc. Приватный keyset устройства не отдаётся ни одним методом.
+/// Secret-boundary contract (see module-doc `unissh-ffi`): enumerates the ONLY
+/// methods allowed to return secret material outward, and checks their
+/// type-gating. Tripwire: added a new secret-returning method — update both this
+/// test and the module-doc. The device's private keyset is returned by no method.
 #[test]
 fn secret_returning_surface() {
-    // Намеренно секрето-возвращающие методы (исчерпывающий список):
+    // Deliberately secret-returning methods (exhaustive list):
     const SECRET_RETURNING: &[&str] = &[
         "get_password",   // user secret (password manager reveal)
         "get_note",       // user secret (note reveal)
@@ -3280,7 +3280,7 @@ fn secret_returning_surface() {
     assert_eq!(
         SECRET_RETURNING.len(),
         4,
-        "обнови тест при изменении surface"
+        "update the test when the surface changes"
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -3294,7 +3294,7 @@ fn secret_returning_surface() {
     core.generate_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
 
-    // get_password: reveal только для password-item, иначе отказ (type-gate).
+    // get_password: reveal only for a password item, otherwise refuse (type-gate).
     assert_eq!(
         core.get_password("v".to_string(), "pw".to_string())
             .unwrap(),
@@ -3307,26 +3307,26 @@ fn secret_returning_surface() {
         .get_password("v".to_string(), "key".to_string())
         .is_err());
 
-    // get_note: reveal только для note-item.
+    // get_note: reveal only for a note item.
     assert_eq!(
         core.get_note("v".to_string(), "nt".to_string()).unwrap(),
         "a note"
     );
     assert!(core.get_note("v".to_string(), "pw".to_string()).is_err());
 
-    // export_ssh_key: приватный ключ — by-design, но только для SSH-key item.
+    // export_ssh_key: the private key — by-design, but only for an SSH-key item.
     let priv_key = core
         .export_ssh_key("v".to_string(), "key".to_string())
         .unwrap();
     assert!(
         priv_key.contains("PRIVATE KEY"),
-        "ожидался OpenSSH-приватник"
+        "expected an OpenSSH private key"
     );
     assert!(core
         .export_ssh_key("v".to_string(), "pw".to_string())
         .is_err());
 
-    // export_vault: непустой зашифрованный бэкап.
+    // export_vault: a non-empty encrypted backup.
     let backup = core
         .export_vault("v".to_string(), "backup-pass".to_string())
         .unwrap();

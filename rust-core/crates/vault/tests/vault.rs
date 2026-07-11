@@ -1,5 +1,5 @@
-//! Тесты локального волта: round-trip item через VK, изоляция, неверный keyset,
-//! подпись, tombstone.
+//! Local vault tests: item round-trip through the VK, isolation, wrong keyset,
+//! signature, tombstone.
 
 use unissh_crypto::X25519Keypair;
 use unissh_keychain::{create_account, KdfParams, UnlockedKeyset};
@@ -7,7 +7,7 @@ use unissh_storage::{ItemRecord, Storage};
 use unissh_vault::{Vault, VaultError};
 
 fn keyset() -> UnlockedKeyset {
-    // SecretKeyOnly режим → без Argon2id, быстро
+    // SecretKeyOnly mode → no Argon2id, fast
     let (_sk, _rec, unlocked) = create_account(None, KdfParams::recommended()).unwrap();
     unlocked
 }
@@ -41,7 +41,7 @@ fn reopen_vault_and_read_item() {
         let v = Vault::create(&st, &ks, b"v".to_vec(), b"name").unwrap();
         v.put_item(b"i", 2, b"secret-content").unwrap();
     }
-    // повторное открытие тем же keyset
+    // reopen with the same keyset
     let v = Vault::open(&st, &ks, b"v").unwrap();
     assert_eq!(v.name(), b"name");
     let got = v.get_item(b"i").unwrap().unwrap();
@@ -55,7 +55,7 @@ fn wrong_keyset_cannot_open() {
     {
         let _v = Vault::create(&st, &ks, b"v".to_vec(), b"name").unwrap();
     }
-    // другой keyset — VK не развернётся
+    // a different keyset — the VK cannot be unwrapped
     let other = keyset();
     let err = Vault::open(&st, &other, b"v").unwrap_err();
     assert!(matches!(err, VaultError::Decrypt));
@@ -94,7 +94,7 @@ fn delete_vault_tombstones() {
     let ks = keyset();
     let v = Vault::create(&st, &ks, b"v".to_vec(), b"n").unwrap();
     v.delete().unwrap();
-    // больше не открывается
+    // no longer opens
     assert!(matches!(
         Vault::open(&st, &ks, b"v").unwrap_err(),
         VaultError::NotFound
@@ -109,7 +109,7 @@ fn vault_isolation_independent_vks() {
     let v2 = Vault::create(&st, &ks, b"v2".to_vec(), b"two").unwrap();
     v1.put_item(b"i", 1, b"in-v1").unwrap();
 
-    // item из v1 не виден в v2
+    // an item from v1 is not visible in v2
     assert!(v2.get_item(b"i").unwrap().is_none());
     assert_eq!(
         v1.get_item(b"i").unwrap().unwrap().content.as_slice(),
@@ -124,11 +124,11 @@ fn tampered_item_fails_signature() {
     let v = Vault::create(&st, &ks, b"v".to_vec(), b"n").unwrap();
     v.put_item(b"i", 1, b"content").unwrap();
 
-    // подкладываем запись с большей версией, но мусорной подписью
+    // inject a record with a higher version but a garbage signature
     let mut rec = st.get_item(b"v", b"i").unwrap().unwrap();
     rec.version = 99;
-    rec.content_blob[5] ^= 0x01; // меняем шифротекст
-                                 // signature осталась старой → не совпадёт
+    rec.content_blob[5] ^= 0x01; // mutate the ciphertext
+                                 // signature is still the old one → won't match
     st.put_item(&rec).unwrap();
 
     assert!(matches!(
@@ -155,7 +155,7 @@ fn manual_record_bad_signature_rejected() {
         author_pubkey: vec![0u8; 32],
         created_at: 0,
         updated_at: 0,
-        // TODO(P3/P4): эпоха ключа волта при ротации VK; пока единственная (0).
+        // TODO(P3/P4): vault key epoch under VK rotation; only one for now (0).
         key_epoch: 0,
     };
     st.put_item(&bogus).unwrap();
@@ -171,13 +171,13 @@ fn rename_item_moves_content_and_tombstones_old() {
 
     v.rename_item(b"old", b"new").unwrap();
 
-    // старого нет, новый несёт тот же контент и тип
+    // the old one is gone, the new one carries the same content and type
     assert!(v.get_item(b"old").unwrap().is_none());
     let moved = v.get_item(b"new").unwrap().unwrap();
     assert_eq!(moved.item_type, 1);
     assert_eq!(moved.content.as_slice(), b"secret-content");
 
-    // в списке ровно один живой item
+    // exactly one live item in the list
     let live = v.list_items().unwrap();
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].item_id, b"new");
@@ -194,7 +194,7 @@ fn rename_item_rejects_existing_target() {
         v.rename_item(b"a", b"b"),
         Err(unissh_vault::VaultError::AlreadyExists)
     ));
-    // переименование отсутствующего — NotFound
+    // renaming a missing item — NotFound
     assert!(matches!(
         v.rename_item(b"missing", b"z"),
         Err(unissh_vault::VaultError::NotFound)
@@ -214,7 +214,7 @@ fn seal_vk_to_recipient_extension_point() {
         .unwrap();
     assert!(!wrapped.is_empty());
 
-    // некорректный публичный ключ — ошибка
+    // malformed public key — error
     assert!(v.seal_vk_to_recipient(b"too-short", &recipient_ed).is_err());
 }
 
@@ -225,12 +225,12 @@ fn verify_chain_ok_for_valid_vault() {
     let v = Vault::create(&st, &ks, b"v".to_vec(), b"n").unwrap();
     v.put_item(b"a", 1, b"alpha").unwrap();
     v.put_item(b"b", 4, b"bravo").unwrap();
-    v.delete_item(b"b").unwrap(); // tombstone — тоже должен пройти аудит
+    v.delete_item(b"b").unwrap(); // tombstone — must also pass the audit
 
     let report = v.verify_chain().unwrap();
     assert!(report.ok, "issues: {:?}", report.issues);
     assert!(report.issues.is_empty());
-    // vault-запись + item a + item b(tombstone) = 3
+    // vault record + item a + item b(tombstone) = 3
     assert!(report.checked >= 3);
 }
 
@@ -241,7 +241,7 @@ fn verify_chain_flags_tampered_content() {
     let v = Vault::create(&st, &ks, b"v".to_vec(), b"n").unwrap();
     v.put_item(b"i", 1, b"content").unwrap();
 
-    // версия выше (проходит anti-rollback), контент изменён, подпись старая
+    // higher version (passes anti-rollback), content mutated, signature stale
     let mut rec = st.get_item(b"v", b"i").unwrap().unwrap();
     rec.version = 99;
     rec.content_blob[3] ^= 0x01;
@@ -256,8 +256,8 @@ fn verify_chain_flags_tampered_content() {
 
 #[test]
 fn check_item_record_detects_author_mismatch() {
-    // Запись, валидно подписанная ДРУГИМ владельцем, но сверяемая с нашим
-    // доверенным ключом → AuthorMismatch (главный кейс: подмена author_pubkey).
+    // A record validly signed by a DIFFERENT owner but checked against our
+    // trusted key → AuthorMismatch (main case: forged author_pubkey).
     let st = storage();
     let owner = keyset();
     let attacker = keyset();
@@ -270,7 +270,7 @@ fn check_item_record_detects_author_mismatch() {
         unissh_vault::check_item_record(&rec, &trusted),
         Some(unissh_vault::IntegrityFailure::AuthorMismatch)
     );
-    // тот же ключ-владелец → ок
+    // same owner key → ok
     let attacker_trusted = attacker.signing.verifying.to_bytes();
     assert_eq!(
         unissh_vault::check_item_record(&rec, &attacker_trusted),
@@ -292,10 +292,10 @@ fn check_item_record_detects_malformed_author() {
         version: 1,
         tombstone: false,
         signature: vec![0u8; 67],
-        author_pubkey: vec![0u8; 5], // не 32 байта
+        author_pubkey: vec![0u8; 5], // not 32 bytes
         created_at: 0,
         updated_at: 0,
-        // TODO(P3/P4): эпоха ключа волта при ротации VK; пока единственная (0).
+        // TODO(P3/P4): vault key epoch under VK rotation; only one for now (0).
         key_epoch: 0,
     };
     assert_eq!(
@@ -313,12 +313,12 @@ fn item_history_reveal_through_vault() {
     v.put_item_keep_history(b"pw", 4, b"secret2").unwrap();
     v.put_item_keep_history(b"pw", 4, b"secret3").unwrap();
 
-    // версии: текущая 3 + архив 2,1
+    // versions: current 3 + archive 2,1
     let mut versions = v.list_item_versions(b"pw").unwrap();
     versions.sort();
     assert_eq!(versions, vec![1, 2, 3]);
 
-    // reveal каждой версии (подпись проверяется, контент расшифровывается)
+    // reveal each version (signature is verified, content is decrypted)
     assert_eq!(
         v.get_item_version(b"pw", 1)
             .unwrap()
@@ -343,7 +343,7 @@ fn item_history_reveal_through_vault() {
             .as_slice(),
         b"secret3"
     );
-    // несуществующая версия → None
+    // nonexistent version → None
     assert!(v.get_item_version(b"pw", 9).unwrap().is_none());
 }
 
@@ -357,7 +357,7 @@ fn delete_clears_item_history() {
     assert!(!v.list_item_versions(b"pw").unwrap().is_empty());
 
     v.delete_item(b"pw").unwrap();
-    // удалённый секрет: история стёрта, старый plaintext не достаётся
+    // deleted secret: history wiped, old plaintext is unrecoverable
     assert!(v.list_item_versions(b"pw").unwrap().is_empty());
     assert!(v.get_item_version(b"pw", 1).unwrap().is_none());
 }
@@ -369,10 +369,10 @@ fn verify_chain_audits_history_records() {
     let v = Vault::create(&st, &ks, b"v".to_vec(), b"n").unwrap();
     v.put_item_keep_history(b"pw", 4, b"v1").unwrap();
     v.put_item_keep_history(b"pw", 4, b"v2").unwrap();
-    v.put_item_keep_history(b"pw", 4, b"v3").unwrap(); // 2 архивные версии
+    v.put_item_keep_history(b"pw", 4, b"v3").unwrap(); // 2 archived versions
 
     let report = v.verify_chain().unwrap();
     assert!(report.ok, "issues: {:?}", report.issues);
-    // vault(1) + текущий pw(1) + 2 истории = минимум 4 проверенных записи
+    // vault(1) + current pw(1) + 2 history = at least 4 verified records
     assert!(report.checked >= 4, "checked={}", report.checked);
 }

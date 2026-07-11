@@ -284,7 +284,7 @@ async fn delta_filters_by_vault_membership() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &owner1, 200).await.unwrap().len(),
         2,
-        "owner1 видит свой волт + vault-less audit, не чужой волт"
+        "owner1 sees its own vault + vault-less audit, not another's vault"
     );
     // owner2: vault-2 + audit = 2.
     assert_eq!(
@@ -298,7 +298,7 @@ async fn delta_filters_by_vault_membership() {
             .unwrap()
             .len(),
         1,
-        "посторонний видит только vault-less, ни одного волта"
+        "a stranger sees only vault-less objects, not a single vault"
     );
 }
 
@@ -329,7 +329,7 @@ async fn delta_grant_grants_visibility() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &member, 200).await.unwrap().len(),
         3,
-        "член с активным грантом видит vault+manifest+grant"
+        "a member with an active grant sees vault+manifest+grant"
     );
     // a stranger without a grant — nothing (no vault-less objects).
     assert_eq!(
@@ -367,7 +367,7 @@ async fn replayed_grant_does_not_resurrect_revoked_access() {
         s.member_has_active_grant(TA, b"vault-1", 1, &member, 200)
             .await
             .unwrap(),
-        "свежий грант активен"
+        "a fresh grant is active"
     );
 
     // Offboarding: revoke epoch 1 (like revoke_epoch in grants_publish).
@@ -382,7 +382,7 @@ async fn replayed_grant_does_not_resurrect_revoked_access() {
         !s.member_has_active_grant(TA, b"vault-1", 1, &member, 200)
             .await
             .unwrap(),
-        "после отзыва — не активен"
+        "after revocation — not active"
     );
 
     // Replaying the same grant@1 publication (retry/malicious) does NOT resurrect access.
@@ -399,7 +399,7 @@ async fn replayed_grant_does_not_resurrect_revoked_access() {
         !s.member_has_active_grant(TA, b"vault-1", 1, &member, 200)
             .await
             .unwrap(),
-        "реплей гранта не воскрешает отозванный доступ (#10)"
+        "replaying the grant does not resurrect revoked access (#10)"
     );
 }
 
@@ -428,7 +428,7 @@ async fn delta_stale_epoch_grant_loses_visibility() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &member, 200).await.unwrap().len(),
         3,
-        "член@1 видит объекты при активной эпохе 1"
+        "member@1 sees objects while epoch 1 is active"
     );
 
     // Rotation: publish manifest@2 (the member is NOT re-issued for epoch 2).
@@ -445,7 +445,7 @@ async fn delta_stale_epoch_grant_loses_visibility() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &member, 200).await.unwrap().len(),
         0,
-        "член со stale-грантом@1 теряет видимость после ротации на @2 (#7)"
+        "a member with a stale grant@1 loses visibility after rotation to @2 (#7)"
     );
 }
 
@@ -479,13 +479,13 @@ async fn delta_expired_grant_stops_delivering() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &member, 140).await.unwrap().len(),
         3,
-        "до истечения not_after член видит объекты"
+        "before not_after expires the member sees objects"
     );
     // now=200 > 150 → the grant expired → no visibility.
     assert_eq!(
         s.delta_since(TA, 0, 100, &member, 200).await.unwrap().len(),
         0,
-        "после not_after грант истёк, видимости нет (#11)"
+        "after not_after the grant expired, no visibility (#11)"
     );
 }
 
@@ -532,7 +532,7 @@ async fn empty_vault_id_vault_scoped_object_not_broadcast() {
     assert_eq!(
         rows.len(),
         1,
-        "посторонний видит keyset, но НЕ Item с пустым vault_id"
+        "a stranger sees the keyset, but NOT an Item with an empty vault_id"
     );
 }
 
@@ -601,11 +601,11 @@ async fn grant_activation_reemits_vault_objects_above_cursor() {
         .collect();
     assert!(
         tags.contains(&1),
-        "re-emit должен доставить vault-запись выше курсора: {tags:?}"
+        "re-emit must deliver the vault record above the cursor: {tags:?}"
     );
     assert!(
         tags.contains(&2),
-        "re-emit должен доставить item выше курсора: {tags:?}"
+        "re-emit must deliver the item above the cursor: {tags:?}"
     );
 }
 
@@ -641,13 +641,13 @@ async fn delta_account_state_visible_only_to_author() {
     assert_eq!(
         s.delta_since(TA, 0, 100, &alice, 200).await.unwrap().len(),
         1,
-        "автор видит своё account-state"
+        "the author sees their own account-state"
     );
     // Bob (a different account) does NOT see another's account-state (no vault-less objects).
     assert_eq!(
         s.delta_since(TA, 0, 100, &bob, 200).await.unwrap().len(),
         0,
-        "чужой не видит account-state другого аккаунта"
+        "a stranger does not see another account's account-state"
     );
 }
 
@@ -689,7 +689,7 @@ async fn account_state_older_versions_compacted() {
     assert_eq!(
         account_state_row_count(&s, &author).await,
         1,
-        "старые версии account-state скомпакчены"
+        "older account-state versions are compacted"
     );
     let ver = s
         .fetch_scalar_i64(
@@ -700,7 +700,7 @@ async fn account_state_older_versions_compacted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(ver, 3, "остаётся последняя версия");
+    assert_eq!(ver, 3, "the latest version remains");
 
     // An equal version from a second device (different payload/signature) is NOT pruned:
     // the client resolves equal versions by signature (S2), the server keeps both.
@@ -716,7 +716,7 @@ async fn account_state_older_versions_compacted() {
     assert_eq!(
         account_state_row_count(&s, &author).await,
         2,
-        "равные версии сохраняются обе (tiebreak на клиенте)"
+        "equal versions are both retained (tiebreak on the client)"
     );
 
     // A stale version of another author is not affected by our author's compaction.
@@ -733,6 +733,6 @@ async fn account_state_older_versions_compacted() {
     assert_eq!(
         account_state_row_count(&s, &other).await,
         1,
-        "компакция скоуплена по author_pubkey"
+        "compaction is scoped by author_pubkey"
     );
 }

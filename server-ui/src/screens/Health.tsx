@@ -10,7 +10,7 @@ import { KeysetGate } from "../ui/overlays";
 import { Screen } from "./Screen";
 import { MONO } from "../theme/tokens";
 
-/** "Хд ЧЧ:ММ" from a duration in seconds. */
+/** "Nd HH:MM"-style uptime label from a duration in seconds. */
 function fmtUptime(sec: number): string {
   const total = Math.max(0, Math.floor(sec));
   const d = Math.floor(total / 86400);

@@ -435,11 +435,15 @@ async fn grants_get_hides_existence_from_non_member() {
         .send()
         .await
         .unwrap();
-    assert_eq!(existing.status(), 403, "не-член существующего волта → 403");
+    assert_eq!(
+        existing.status(),
+        403,
+        "a non-member of an existing vault → 403"
+    );
     assert_eq!(
         ghost.status(),
         403,
-        "несуществующий волт → тот же 403 (без existence-oracle)"
+        "a non-existent vault → the same 403 (no existence-oracle)"
     );
 }
 
@@ -528,7 +532,7 @@ async fn grants_publish_rejects_forged_manifest_signature() {
     assert_ne!(
         r.status(),
         200,
-        "форджед-подпись не должна публиковаться (иначе обход vault-admin через spoof author_pubkey)"
+        "a forged signature must not be published (otherwise vault-admin is bypassed by spoofing author_pubkey)"
     );
     assert!(r.status().is_client_error());
 }

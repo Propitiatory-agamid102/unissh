@@ -1,8 +1,8 @@
-//! Регрессия BLOCKER (data-loss): записи, созданные ПОСЛЕ перехода волта в
-//! membership-режим, должны нести актуальную `key_epoch` (>= пол, manifest@epoch),
-//! иначе `verify_record_authority` отвергает их как downgrade (`EpochInvalid`) и
-//! item навсегда нечитаем. До фикса `put_item`/`put_item_keep_history`/
-//! `tombstone_record` штамповали жёстко `key_epoch=0`.
+//! BLOCKER regression (data-loss): records created AFTER a vault transitions into
+//! membership mode must carry the current `key_epoch` (>= floor, manifest@epoch),
+//! otherwise `verify_record_authority` rejects them as a downgrade (`EpochInvalid`)
+//! and the item is permanently unreadable. Before the fix, `put_item`/
+//! `put_item_keep_history`/`tombstone_record` hard-stamped `key_epoch=0`.
 
 use unissh_keychain::{create_account, KdfParams, UnlockedKeyset};
 use unissh_storage::{MemberRole, Storage};
@@ -22,9 +22,9 @@ fn x_of(ks: &UnlockedKeyset) -> Vec<u8> {
     ks.encryption.public.to_bytes().to_vec()
 }
 
-/// BLOCKER: после установления членства (owner=Admin) и переоткрытия волта новый
-/// `put_item` обязан round-trip'иться через `get_item`. До фикса возвращал
-/// `EpochInvalid` (item на key_epoch=0 при membership@1).
+/// BLOCKER: after membership is established (owner=Admin) and the vault reopened, a
+/// new `put_item` must round-trip through `get_item`. Before the fix it returned
+/// `EpochInvalid` (item at key_epoch=0 while membership@1).
 #[test]
 fn put_item_after_membership_roundtrips() {
     let st = storage();
@@ -46,8 +46,8 @@ fn put_item_after_membership_roundtrips() {
     assert_eq!(epoch, 1);
     drop(v);
 
-    // Переоткрываем волт и кладём НОВЫЙ item — он должен попасть на актуальную
-    // эпоху и читаться обратно.
+    // Reopen the vault and put a NEW item — it must land on the current epoch
+    // and read back.
     let v2 = Vault::open(&st, &owner, &vid).unwrap();
     v2.put_item(b"secret", 1, b"top-secret").unwrap();
     let got = v2
@@ -56,19 +56,19 @@ fn put_item_after_membership_roundtrips() {
         .expect("item must exist");
     assert_eq!(got.content.as_slice(), b"top-secret");
 
-    // put_item_keep_history тоже.
+    // put_item_keep_history too.
     v2.put_item_keep_history(b"pwd", 2, b"hunter2").unwrap();
     let pwd = v2.get_item(b"pwd").unwrap().unwrap();
     assert_eq!(pwd.content.as_slice(), b"hunter2");
 
-    // tombstone (delete_item) тоже должен быть авторизован (verify_chain зелёный).
+    // tombstone (delete_item) must also be authorized (verify_chain green).
     v2.delete_item(b"secret").unwrap();
     let report = v2.verify_chain().unwrap();
-    assert!(report.ok, "verify_chain должен быть зелёным: {:?}", report);
+    assert!(report.ok, "verify_chain must be green: {:?}", report);
 }
 
-/// После `rotate_vk` НОВЫЙ `put_item` (на переоткрытом под VK' волте) обязан
-/// round-trip'иться. До фикса записывался на key_epoch=0 < пол → EpochInvalid.
+/// After `rotate_vk`, a NEW `put_item` (on a vault reopened under VK') must
+/// round-trip. Before the fix it was written at key_epoch=0 < floor → EpochInvalid.
 #[test]
 fn put_item_after_rotate_vk_roundtrips() {
     let st = storage();
@@ -92,17 +92,17 @@ fn put_item_after_rotate_vk_roundtrips() {
     assert_eq!(new_epoch, 2);
     drop(v);
 
-    // Переоткрываем под VK' (текущая обёртка владельца на эпохе 2) и кладём новый
-    // item — должен встать на эпоху 2 (>= пол=2, manifest@2) и читаться.
+    // Reopen under VK' (the owner's current wrap at epoch 2) and put a new
+    // item — it must land on epoch 2 (>= floor=2, manifest@2) and read back.
     let v2 = Vault::open(&st, &owner, &vid).unwrap();
     v2.put_item(b"fresh", 1, b"after-rotation").unwrap();
     let got = v2.get_item(b"fresh").unwrap().unwrap();
     assert_eq!(got.content.as_slice(), b"after-rotation");
 
-    // Записанный item несёт key_epoch=2 (актуальная эпоха волта), не 0.
+    // The written item carries key_epoch=2 (the vault's current epoch), not 0.
     let rec = st.get_item(&vid, b"fresh").unwrap().unwrap();
     assert_eq!(rec.key_epoch, 2);
 
     let report = v2.verify_chain().unwrap();
-    assert!(report.ok, "verify_chain должен быть зелёным: {:?}", report);
+    assert!(report.ok, "verify_chain must be green: {:?}", report);
 }

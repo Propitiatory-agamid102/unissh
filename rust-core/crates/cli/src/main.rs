@@ -33,7 +33,7 @@ fn build_auth(
     match (password, item) {
         (Some(password), _) => Ok(AuthMethod::Password { password }),
         (None, Some(item)) => Ok(item_auth(vault, &item)),
-        (None, None) => Err("укажите --item <ключ | pw:пароль-item> или --password".into()),
+        (None, None) => Err("specify --item <key | pw:password-item> or --password".into()),
     }
 }
 
@@ -67,7 +67,7 @@ fn item_auth(vault: &str, item: &str) -> AuthMethod {
 }
 
 #[derive(Parser)]
-#[command(name = "unissh", about = "UniSSH core CLI harness (Веха 1)")]
+#[command(name = "unissh", about = "UniSSH core CLI harness (Milestone 1)")]
 struct Cli {
     /// Path to the instance's encrypted DB file.
     #[arg(long, global = true, default_value = "unissh.db")]
@@ -493,7 +493,7 @@ impl SessionObserver for StdoutObserver {
     }
     fn on_close(&self, exit_status: i32) {
         self.done.store(true, std::sync::atomic::Ordering::SeqCst);
-        eprintln!("\n[сессия закрыта, код {exit_status}]");
+        eprintln!("\n[session closed, code {exit_status}]");
     }
 }
 
@@ -514,7 +514,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match cli.cmd {
         Cmd::Init { password } => {
             let secret = core.create_account(password)?;
-            println!("Secret Key (СОХРАНИТЕ — Emergency Kit, показывается один раз):");
+            println!("Secret Key (SAVE THIS — Emergency Kit, shown once):");
             println!("{secret}");
         }
         Cmd::CreateVault { unlock, id, name } => {

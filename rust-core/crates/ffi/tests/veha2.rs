@@ -1,14 +1,14 @@
-//! P7 — FFI-экспозиция операций Веха-2: cloud-волт, членство, ротация/purge,
-//! identity/auth, cache-policy, аудит, онбординг Path A/B, синк через коллбэк.
+//! P7 — FFI exposure of Veha-2 operations: cloud vault, membership, rotation/purge,
+//! identity/auth, cache-policy, audit, onboarding Path A/B, sync via callback.
 //!
-//! Жёсткое ограничение: новые методы НЕ отдают plaintext приватные
-//! ключи — только публичные ключи/fingerprints/подписи/непрозрачные блобы.
+//! Hard constraint: the new methods do NOT hand out plaintext private
+//! keys — only public keys/fingerprints/signatures/opaque blobs.
 
 use std::sync::Arc;
 use unissh_ffi::{Core, FfiMemberRole};
 
-/// base64-`tenant_id` тестового сервера, к которому привязываются cloud-волты
-/// (1:1-binding). `sync_now`/`sync_push` фильтруют push по нему.
+/// base64 `tenant_id` of the test server that cloud vaults bind to
+/// (1:1 binding). `sync_now`/`sync_push` filter the push by it.
 const TENANT: &str = "dGVuYW50LXRlc3Q="; // base64("tenant-test")
 
 fn new_core(dir: &std::path::Path) -> Arc<Core> {
@@ -27,15 +27,15 @@ fn create_cloud_vault_returns_uuid_hex_and_lists() {
     let vid = core
         .create_cloud_vault("Shared".to_string(), TENANT.to_string())
         .unwrap();
-    // vault_id = UUIDv4 (16 байт) в hex = 32 hex-символа
+    // vault_id = UUIDv4 (16 bytes) in hex = 32 hex chars
     assert_eq!(vid.len(), 32);
     assert!(hex::decode(&vid).is_ok());
 
-    // волт виден в списке (имя расшифровано)
+    // the vault is visible in the list (name decrypted)
     let vaults = core.list_vaults().unwrap();
     assert!(vaults.iter().any(|v| v.name == "Shared"));
 
-    // на заблокированном ядре — Locked
+    // on a locked core — Locked
     core.lock();
     assert!(matches!(
         core.create_cloud_vault("X".to_string(), TENANT.to_string()),
@@ -52,7 +52,7 @@ fn membership_add_list_fingerprint_pin() {
         .create_cloud_vault("Team".to_string(), TENANT.to_string())
         .unwrap();
 
-    // фиксированные публичные ключи "члена" (32 байта каждый) — публичный материал
+    // fixed public keys of the "member" (32 bytes each) — public material
     let member_ed = "11".repeat(32);
     let member_x = "22".repeat(32);
 
@@ -65,7 +65,7 @@ fn membership_add_list_fingerprint_pin() {
     .unwrap();
 
     let members = core.list_members(vid.clone()).unwrap();
-    // owner (Admin) + новый член (Editor)
+    // owner (Admin) + new member (Editor)
     assert_eq!(members.len(), 2);
     assert!(members
         .iter()
@@ -76,16 +76,16 @@ fn membership_add_list_fingerprint_pin() {
         .unwrap();
     assert_eq!(me.fingerprint.len(), 64); // hex(SHA-256)
 
-    // standalone fingerprint совпадает с тем, что в списке
+    // standalone fingerprint matches the one in the list
     let fp = core.member_fingerprint(member_ed.clone()).unwrap();
     assert_eq!(fp, me.fingerprint);
 
-    // OOB-pin: первый раз ок (TOFU), повторный с тем же ключом — ок
+    // OOB pin: first time ok (TOFU), repeat with the same key — ok
     core.confirm_member_pin("acct-bob".to_string(), member_ed.clone())
         .unwrap();
     core.confirm_member_pin("acct-bob".to_string(), member_ed.clone())
         .unwrap();
-    // другой ключ под тем же account_id → ошибка (PinMismatch)
+    // a different key under the same account_id → error (PinMismatch)
     assert!(core
         .confirm_member_pin("acct-bob".to_string(), "33".repeat(32))
         .is_err());
@@ -99,10 +99,10 @@ fn set_personal_vault_rejects_shared_vault() {
     let vid = core
         .create_cloud_vault("Team".to_string(), TENANT.to_string())
         .unwrap();
-    // Solo волт (ещё нет members) → можно сделать личным.
+    // Solo vault (no members yet) → can be made personal.
     core.set_personal_vault(vid.clone()).unwrap();
-    // Добавляем члена → волт становится shared (2 члена) → set_personal_vault
-    // отказывает (иначе личные идентичности/привязки утекли бы команде, B5.3).
+    // Add a member → the vault becomes shared (2 members) → set_personal_vault
+    // refuses (otherwise personal identities/bindings would leak to the team, B5.3).
     core.add_member(
         vid.clone(),
         "11".repeat(32),
@@ -143,7 +143,7 @@ fn rotate_vk_and_purge_cloud_vault() {
         .create_cloud_vault("R".to_string(), TENANT.to_string())
         .unwrap();
 
-    // владелец (Admin) + bob (Editor)
+    // owner (Admin) + bob (Editor)
     let bob_ed = "44".repeat(32);
     let bob_x = "55".repeat(32);
     core.add_member(
@@ -154,20 +154,20 @@ fn rotate_vk_and_purge_cloud_vault() {
     )
     .unwrap();
 
-    // ротация: оставить ТОЛЬКО владельца (отзыв bob). Владелец всегда сохраняется
-    // ядром как Admin → передаём пустой список «дополнительных оставшихся».
+    // rotation: keep ONLY the owner (revoke bob). The owner is always retained
+    // by the core as Admin → we pass an empty list of "additional remaining members".
     let new_epoch = core.rotate_vk(vid.clone(), vec![]).unwrap();
     assert!(new_epoch >= 2);
 
     // verify_chain ok
     let report = core.verify_chain(vid.clone()).unwrap();
-    assert!(report.ok, "verify_chain должен быть ok: {report:?}");
+    assert!(report.ok, "verify_chain should be ok: {report:?}");
 
-    // bob больше не член на новой эпохе
+    // bob is no longer a member in the new epoch
     let members = core.list_members(vid.clone()).unwrap();
     assert!(members.iter().all(|m| m.ed25519_pub_hex != bob_ed));
 
-    // purge → волт исчезает из списка
+    // purge → the vault disappears from the list
     core.purge_vault(vid.clone()).unwrap();
     let vaults = core.list_vaults().unwrap();
     assert!(vaults.iter().all(|v| v.name != "R"));
@@ -179,17 +179,17 @@ fn identity_account_id_registration_and_server_auth() {
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
 
-    // account-id стабилен между вызовами (генерится один раз и персистится)
+    // account-id is stable across calls (generated once and persisted)
     let aid1 = core.account_id().unwrap();
     let aid2 = core.account_id().unwrap();
     assert_eq!(aid1, aid2);
-    assert_eq!(aid1.len(), 32); // 16 байт hex
+    assert_eq!(aid1.len(), 32); // 16 bytes hex
 
-    // registration-блоб непустой
+    // registration blob is non-empty
     let reg = core.build_registration().unwrap();
     assert!(!reg.is_empty());
 
-    // server-auth подпись непустая (домен unissh-server-auth-v1)
+    // server-auth signature is non-empty (domain unissh-server-auth-v1)
     let sig = core
         .sign_server_challenge(
             "vault.example.com".to_string(),
@@ -202,7 +202,7 @@ fn identity_account_id_registration_and_server_auth() {
         .unwrap();
     assert!(!sig.is_empty());
 
-    // на заблокированном ядре — Locked
+    // on a locked core — Locked
     core.lock();
     assert!(matches!(
         core.account_id(),
@@ -224,7 +224,7 @@ fn cache_policy_get_set_and_audit() {
         .create_cloud_vault("C".to_string(), TENANT.to_string())
         .unwrap();
 
-    // дефолт — OfflineAllowed
+    // default — OfflineAllowed
     assert!(matches!(
         core.get_cache_policy(vid.clone()).unwrap(),
         FfiCachePolicy::OfflineAllowed
@@ -236,7 +236,7 @@ fn cache_policy_get_set_and_audit() {
         FfiCachePolicy::OnlineOnly
     ));
 
-    // аудит: append непрозрачную подписанную тройку → query видит её
+    // audit: append an opaque signed triple → query sees it
     let entry = b"signed-audit-event".to_vec();
     let sig = vec![7u8; 67];
     let author = "66".repeat(32);
@@ -248,24 +248,24 @@ fn cache_policy_get_set_and_audit() {
     assert_eq!(entries[0].author_pubkey_hex, author);
     assert!(entries[0].seq >= 1);
 
-    // since_seq фильтрует
+    // since_seq filters
     let after = core.audit_query(entries[0].seq).unwrap();
     assert!(after.is_empty());
 }
 
 #[test]
 fn onboarding_path_a_unlock_from_server_blob() {
-    // Устройство A: создаём аккаунт с паролем, забираем Secret Key + keyset-блоб.
+    // Device A: create an account with a password, grab the Secret Key + keyset blob.
     let dir_a = tempfile::tempdir().unwrap();
     let core_a = new_core(dir_a.path());
     let secret = core_a.create_account(Some("pw".to_string())).unwrap();
     core_a
         .create_vault("v".to_string(), "V".to_string())
         .unwrap();
-    // keyset-блоб A = содержимое сайдкара keyset (уже зашифрован под Unlock Key).
+    // keyset blob A = contents of the keyset sidecar (already encrypted under the Unlock Key).
     let keyset_blob = std::fs::read(dir_a.path().join("keyset.bin")).unwrap();
 
-    // Устройство B: пустой инстанс, принимает keyset-блоб «с сервера» (Path A).
+    // Device B: empty instance, accepts the keyset blob "from the server" (Path A).
     let dir_b = tempfile::tempdir().unwrap();
     let core_b = new_core(dir_b.path());
     core_b
@@ -273,14 +273,14 @@ fn onboarding_path_a_unlock_from_server_blob() {
         .unwrap();
     assert!(core_b.is_unlocked());
 
-    // битый keyset-блоб → типизированная ошибка, не паника
+    // a corrupt keyset blob → a typed error, not a panic
     let dir_c = tempfile::tempdir().unwrap();
     let core_c = new_core(dir_c.path());
     assert!(core_c
         .unlock_from_server_blob(vec![1, 2, 3], Some("pw".to_string()), secret.clone())
         .is_err());
 
-    // неверный пароль → InvalidCredentials
+    // wrong password → InvalidCredentials
     let dir_d = tempfile::tempdir().unwrap();
     let core_d = new_core(dir_d.path());
     assert!(matches!(
@@ -289,12 +289,12 @@ fn onboarding_path_a_unlock_from_server_blob() {
     ));
 }
 
-/// NEGATIVE (anti-rollback, server-tz §13.13b): `unlock_from_server_blob` обязан
-/// ОТВЕРГНУТЬ устаревший keyset-блоб (generation ниже доверенного пола) ДО приёма,
-/// а не только поднимать пол после. Прежняя версия принимала такой блоб.
+/// NEGATIVE (anti-rollback, server-tz §13.13b): `unlock_from_server_blob` must
+/// REJECT a stale keyset blob (generation below the trusted floor) BEFORE accepting
+/// it, not only raise the floor afterward. The previous version accepted such a blob.
 #[test]
 fn unlock_from_server_blob_rejects_stale_generation() {
-    // Устройство A: аккаунт (gen 1) → захватываем СТАРЫЙ блоб → смена пароля (gen 2).
+    // Device A: account (gen 1) → capture the OLD blob → change password (gen 2).
     let dir_a = tempfile::tempdir().unwrap();
     let core_a = new_core(dir_a.path());
     let secret = core_a.create_account(Some("pw1".to_string())).unwrap();
@@ -308,7 +308,7 @@ fn unlock_from_server_blob_rejects_stale_generation() {
         .unwrap();
     let fresh_blob = std::fs::read(dir_a.path().join("keyset.bin")).unwrap(); // gen 2
 
-    // Устройство B: принимает СВЕЖИЙ блоб (gen 2) — пол поднимается до 2.
+    // Device B: accepts the FRESH blob (gen 2) — the floor is raised to 2.
     let dir_b = tempfile::tempdir().unwrap();
     let core_b = new_core(dir_b.path());
     core_b
@@ -316,34 +316,31 @@ fn unlock_from_server_blob_rejects_stale_generation() {
         .unwrap();
     core_b.lock();
 
-    // Малициозный сервер подсовывает СТАРЫЙ блоб (gen 1 < пол 2) с верным старым
-    // паролем — должен быть отвергнут как rollback (не InvalidCredentials).
+    // A malicious server slips in the OLD blob (gen 1 < floor 2) with the correct old
+    // password — it must be rejected as a rollback (not InvalidCredentials).
     let err = core_b
         .unlock_from_server_blob(stale_blob, Some("pw1".to_string()), secret)
         .unwrap_err();
     assert!(
         matches!(err, unissh_ffi::FfiError::Other { .. }),
-        "stale generation должен быть отвергнут (rollback), got {err:?}"
+        "stale generation must be rejected (rollback), got {err:?}"
     );
-    assert!(
-        !core_b.is_unlocked(),
-        "состояние не должно быть установлено"
-    );
+    assert!(!core_b.is_unlocked(), "state must not be established");
 }
 
-/// NEGATIVE (anti-rollback, server-tz §13.13b): после `change_password` старый
-/// (понижённой generation) keyset-блоб больше не должен приниматься на этом
-/// устройстве — `change_password` обязан поднять доверенный пол. Прежняя версия
-/// пол не поднимала, старый блоб проходил.
+/// NEGATIVE (anti-rollback, server-tz §13.13b): after `change_password` the old
+/// (lower-generation) keyset blob must no longer be accepted on this
+/// device — `change_password` must raise the trusted floor. The previous version
+/// didn't raise the floor, and the old blob went through.
 #[test]
 fn change_password_raises_floor_rejecting_old_blob() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     let secret = core.create_account(Some("old".to_string())).unwrap();
-    // gen 1 блоб ДО смены пароля.
+    // gen 1 blob BEFORE the password change.
     let old_blob = std::fs::read(dir.path().join("keyset.bin")).unwrap();
 
-    // Смена пароля (в разблокированном состоянии): gen → 2, пол → 2.
+    // Password change (in the unlocked state): gen → 2, floor → 2.
     core.change_password(
         Some("old".to_string()),
         Some("new".to_string()),
@@ -351,39 +348,39 @@ fn change_password_raises_floor_rejecting_old_blob() {
     )
     .unwrap();
 
-    // Старый блоб (gen 1 < пол 2), даже с верным старым паролем, отвергается
-    // через тот же inst.db (anti-rollback пол в storage-meta).
+    // The old blob (gen 1 < floor 2), even with the correct old password, is rejected
+    // via the same inst.db (anti-rollback floor in storage-meta).
     core.lock();
     let err = core
         .unlock_from_server_blob(old_blob, Some("old".to_string()), secret.clone())
         .unwrap_err();
     assert!(
         matches!(err, unissh_ffi::FfiError::Other { .. }),
-        "старый блоб после change_password должен быть отвергнут, got {err:?}"
+        "the old blob after change_password must be rejected, got {err:?}"
     );
     assert!(!core.is_unlocked());
 
-    // А свежий блоб (gen 2) с новым паролем — открывается.
+    // And the fresh blob (gen 2) with the new password — unlocks.
     let fresh_blob = std::fs::read(dir.path().join("keyset.bin")).unwrap();
     core.unlock_from_server_blob(fresh_blob, Some("new".to_string()), secret)
         .unwrap();
     assert!(core.is_unlocked());
 }
 
-/// NEGATIVE (anti-rollback, server-tz §13.13b): локальный `Core::unlock` обязан
-/// ОТВЕРГНУТЬ устаревший keyset-сайдкар (generation ниже доверенного пола) — так
-/// же, как `unlock_from_server_blob`. После смены пароля пол поднят; атакующий с
-/// доступом к диску подменяет сайдкар СТАРЫМ (понижённой generation) блобом с
-/// верным старым паролем — это downgrade, и обычный unlock обязан его отвергнуть.
+/// NEGATIVE (anti-rollback, server-tz §13.13b): the local `Core::unlock` must
+/// REJECT a stale keyset sidecar (generation below the trusted floor) — just
+/// like `unlock_from_server_blob`. After a password change the floor is raised; an
+/// attacker with disk access swaps the sidecar for an OLD (lower-generation) blob with
+/// the correct old password — that's a downgrade, and a normal unlock must reject it.
 #[test]
 fn local_unlock_rejects_stale_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     let secret = core.create_account(Some("pw1".to_string())).unwrap();
-    // gen 1 блоб ДО смены пароля (захватываем для downgrade-атаки).
+    // gen 1 blob BEFORE the password change (captured for the downgrade attack).
     let stale_blob = std::fs::read(dir.path().join("keyset.bin")).unwrap();
 
-    // Смена пароля (в разблокированном состоянии): gen → 2, пол → 2.
+    // Password change (in the unlocked state): gen → 2, floor → 2.
     core.change_password(
         Some("pw1".to_string()),
         Some("pw2".to_string()),
@@ -391,14 +388,14 @@ fn local_unlock_rejects_stale_sidecar() {
     )
     .unwrap();
 
-    // POSITIVE: обычный unlock текущим (gen 2 ≥ пол 2) сайдкаром — открывается.
+    // POSITIVE: a normal unlock with the current (gen 2 ≥ floor 2) sidecar — unlocks.
     core.lock();
     core.unlock(Some("pw2".to_string()), secret.clone())
         .unwrap();
     assert!(core.is_unlocked());
 
-    // Атакующий подменяет сайдкар СТАРЫМ блобом (gen 1 < пол 2) и пробует unlock
-    // верным старым паролем → отказ как rollback (FfiError::Other), не InvalidCredentials.
+    // The attacker swaps the sidecar for the OLD blob (gen 1 < floor 2) and tries to unlock
+    // with the correct old password → refused as a rollback (FfiError::Other), not InvalidCredentials.
     core.lock();
     std::fs::write(dir.path().join("keyset.bin"), &stale_blob).unwrap();
     let err = core
@@ -406,11 +403,11 @@ fn local_unlock_rejects_stale_sidecar() {
         .unwrap_err();
     assert!(
         matches!(err, unissh_ffi::FfiError::Other { .. }),
-        "устаревший сайдкар должен быть отвергнут (rollback), got {err:?}"
+        "a stale sidecar must be rejected (rollback), got {err:?}"
     );
     assert!(
         !core.is_unlocked(),
-        "состояние не должно быть установлено при отказе"
+        "state must not be established on refusal"
     );
 }
 
@@ -418,27 +415,27 @@ fn local_unlock_rejects_stale_sidecar() {
 fn onboarding_path_b_pake_device_to_device() {
     use unissh_ffi::{OnboardInitiatorHandle, OnboardResponderHandle};
 
-    // Устройство A (initiator): существующий разблокированный аккаунт.
+    // Device A (initiator): an existing unlocked account.
     let dir_a = tempfile::tempdir().unwrap();
     let core_a = new_core(dir_a.path());
     let sk_a = core_a.create_account(Some("pw-a".to_string())).unwrap();
 
-    let code = b"123456".to_vec(); // короткий OOB-код, показывается пользователю
+    let code = b"123456".to_vec(); // short OOB code, shown to the user
 
-    // initiator.start → хэндл + msg1 (релей responder'у)
+    // initiator.start → handle + msg1 (relayed to the responder)
     let init = OnboardInitiatorHandle::start(code.clone());
     let msg1 = init.msg();
 
-    // responder.respond(code, msg1) → хэндл + msg2 (релей обратно)
+    // responder.respond(code, msg1) → handle + msg2 (relayed back)
     let resp = OnboardResponderHandle::respond(code.clone(), msg1).unwrap();
     let msg2 = resp.msg();
 
-    // initiator.confirm_and_seal(msg2, sk_a) на core_a → msg3 (sealed keyset + shared SK)
+    // initiator.confirm_and_seal(msg2, sk_a) on core_a → msg3 (sealed keyset + shared SK)
     let msg3 = core_a
         .onboard_confirm_and_seal(init, msg2, sk_a.clone())
         .unwrap();
 
-    // responder.finish_install(msg3, password) на НОВОМ устройстве B
+    // responder.finish_install(msg3, password) on the NEW device B
     let dir_b = tempfile::tempdir().unwrap();
     let core_b = new_core(dir_b.path());
     let sk_b = core_b
@@ -446,27 +443,24 @@ fn onboarding_path_b_pake_device_to_device() {
         .unwrap();
     assert!(core_b.is_unlocked());
 
-    // Модель A: устройство B получило ТОТ ЖЕ аккаунтный Secret Key, что и A.
-    assert_eq!(
-        sk_a, sk_b,
-        "общий аккаунтный Secret Key на обоих устройствах"
-    );
-    // И записанный B на диск keyset реально открывается этим общим ключом после
-    // «перезапуска» (свежий Core на тех же файлах) — иначе устройство залочилось бы.
+    // Model A: device B received the SAME account Secret Key as A.
+    assert_eq!(sk_a, sk_b, "shared account Secret Key on both devices");
+    // And the keyset B wrote to disk really unlocks with this shared key after a
+    // "restart" (a fresh Core on the same files) — otherwise the device would be locked out.
     let core_b2 = new_core(dir_b.path());
     core_b2
         .unlock(Some("pw-b".to_string()), sk_b.clone())
         .unwrap();
     assert!(core_b2.is_unlocked());
 
-    // неверный код → ConfirmationFailed где-то на пути confirm
+    // wrong code → ConfirmationFailed somewhere along the confirm path
     let init2 = OnboardInitiatorHandle::start(b"111111".to_vec());
     let resp2 = OnboardResponderHandle::respond(b"999999".to_vec(), init2.msg()).unwrap();
     assert!(core_a
         .onboard_confirm_and_seal(init2, resp2.msg(), sk_a.clone())
         .is_err());
 
-    // одноразовость: повторный вызов на потреблённом хэндле — ошибка
+    // single-use: a repeated call on a consumed handle — error
     let init3 = OnboardInitiatorHandle::start(code.clone());
     let resp3 = OnboardResponderHandle::respond(code, init3.msg()).unwrap();
     let m2b = resp3.msg();
@@ -481,8 +475,8 @@ mod sync_backend {
     use unissh_ffi::{FfiError, FfiSyncTransport, SyncDeltaItem};
     use unissh_sync::{InMemoryTransport, SyncObject, SyncTransport};
 
-    /// «Приложение»-сторона: foreign-реализация коллбэка поверх общего
-    /// InMemoryTransport (модель сервера). Несколько устройств делят один Arc.
+    /// "Application" side: a foreign implementation of the callback over a shared
+    /// InMemoryTransport (server model). Several devices share a single Arc.
     pub struct AppTransport {
         pub inner: Mutex<InMemoryTransport>,
     }
@@ -522,15 +516,15 @@ fn sync_round_trip_via_callback_transport() {
     use sync_backend::AppTransport;
     use unissh_sync::InMemoryTransport;
 
-    // ВАЖНО: оба устройства должны быть ОДНИМ владельцем (общий keyset/Secret Key),
-    // т.к. genesis_owner и VK-обёртки привязаны к keyset. Моделируем так: A создаёт
-    // аккаунт, B онбордится Path A тем же keyset-блобом (как в Task 8).
+    // IMPORTANT: both devices must be the SAME owner (shared keyset/Secret Key),
+    // since genesis_owner and the VK wrappers are bound to the keyset. We model it thus: A
+    // creates the account, B onboards via Path A with the same keyset blob (as in Task 8).
     let dir_a = tempfile::tempdir().unwrap();
     let core_a = new_core(dir_a.path());
     let secret = core_a.create_account(Some("pw".to_string())).unwrap();
     let keyset_blob = std::fs::read(dir_a.path().join("keyset.bin")).unwrap();
-    // Cloud-волт, привязанный к TENANT: только привязанные к синкаемому серверу
-    // волты пушатся (1:1-binding). Local-волт не ушёл бы.
+    // Cloud vault bound to TENANT: only vaults bound to the synced server
+    // are pushed (1:1 binding). A local vault would not go out.
     core_a
         .create_cloud_vault("Synced".to_string(), TENANT.to_string())
         .unwrap();
@@ -541,7 +535,7 @@ fn sync_round_trip_via_callback_transport() {
         .unlock_from_server_blob(keyset_blob, Some("pw".to_string()), secret)
         .unwrap();
 
-    // общий «сервер» за коллбэком
+    // the shared "server" behind the callback
     let backend = Arc::new(AppTransport {
         inner: Mutex::new(InMemoryTransport::new()),
     });
@@ -550,20 +544,17 @@ fn sync_round_trip_via_callback_transport() {
     let rep_a = core_a
         .sync_now(backend.clone(), TENANT.to_string())
         .unwrap();
-    assert!(rep_a.pushed >= 1, "A должен запушить хотя бы vault-запись");
+    assert!(rep_a.pushed >= 1, "A must push at least the vault record");
 
-    // B pull → видит волт A
+    // B pull → sees A's vault
     let rep_b = core_b
         .sync_now(backend.clone(), TENANT.to_string())
         .unwrap();
-    assert!(
-        rep_b.applied >= 1,
-        "B должен применить >=1 объект: {rep_b:?}"
-    );
+    assert!(rep_b.applied >= 1, "B must apply >=1 object: {rep_b:?}");
     let vaults_b = core_b.list_vaults().unwrap();
     assert!(vaults_b.iter().any(|v| v.name == "Synced"));
 
-    // locked-негатив
+    // locked negative
     core_a.lock();
     assert!(matches!(
         core_a.sync_now(backend, TENANT.to_string()),
@@ -580,15 +571,15 @@ fn new_ffi_methods_never_return_private_key_material() {
     use unissh_ffi::{OnboardInitiatorHandle, OnboardResponderHandle};
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    // Secret Key (Emergency Kit) — единственный raw секрет, доступный тесту через
-    // границу (сами keyset-секреты X25519/Ed25519 наружу не отдаются by design,
-    // поэтому их 32-байтовые значения тест получить не может — это и есть гарантия
-    // границы). Ни один возврат/сайдкар/relay-блоб не должен нести raw Secret Key.
+    // Secret Key (Emergency Kit) — the only raw secret available to the test across
+    // the boundary (the keyset secrets X25519/Ed25519 themselves are not handed out by
+    // design, so the test cannot obtain their 32-byte values — that is exactly the
+    // boundary guarantee). No return/sidecar/relay blob must carry the raw Secret Key.
     let secret_hex = core.create_account(Some("masterpw".to_string())).unwrap();
     let secret_raw = hex::decode(secret_hex.trim()).unwrap();
-    // 128-бит Secret Key (SECRET_KEY_LEN=16). Сканируем именно эти raw-байты — это
-    // усиление поверх ASCII-маркера 'OPENSSH PRIVATE KEY'.
-    assert_eq!(secret_raw.len(), 16, "Secret Key — 16 байт (128 бит)");
+    // 128-bit Secret Key (SECRET_KEY_LEN=16). We scan exactly these raw bytes — this
+    // strengthens the check beyond the ASCII marker 'OPENSSH PRIVATE KEY'.
+    assert_eq!(secret_raw.len(), 16, "Secret Key — 16 bytes (128 bits)");
 
     let vid = core
         .create_cloud_vault("Sec".to_string(), TENANT.to_string())
@@ -601,7 +592,7 @@ fn new_ffi_methods_never_return_private_key_material() {
     )
     .unwrap();
 
-    // Возвраты новых методов — публичный/непрозрачный материал.
+    // Returns of the new methods — public/opaque material.
     let aid = core.account_id().unwrap();
     let reg = core.build_registration().unwrap();
     let members = core.list_members(vid.clone()).unwrap();
@@ -617,8 +608,8 @@ fn new_ffi_methods_never_return_private_key_material() {
         )
         .unwrap();
 
-    // Path B: msg3 = sealed keyset (relay-блоб). Должен быть зашифрован — ни маркера
-    // OpenSSH-приватника, ни raw Secret Key байт в открытом виде.
+    // Path B: msg3 = sealed keyset (relay blob). Must be encrypted — neither an OpenSSH
+    // private-key marker nor raw Secret Key bytes in plaintext.
     let code = b"424242".to_vec();
     let init = OnboardInitiatorHandle::start(code.clone());
     let msg1 = init.msg();
@@ -628,34 +619,37 @@ fn new_ffi_methods_never_return_private_key_material() {
         .onboard_confirm_and_seal(init, msg2, secret_hex.clone())
         .unwrap();
 
-    // Маркер OpenSSH-приватника не встречается ни в одном возврате (вкл. msg3).
+    // The OpenSSH private-key marker appears in none of the returns (incl. msg3).
     let marker = b"OPENSSH PRIVATE KEY";
     for blob in [reg.as_slice(), sig.as_slice(), msg3.as_slice()] {
-        assert!(!contains(blob, marker), "OpenSSH-маркер просочился");
-        // И raw 32-байтовый секрет (Secret Key) — тоже нигде в открытом виде.
+        assert!(!contains(blob, marker), "OpenSSH marker leaked");
+        // And the raw 32-byte secret (Secret Key) — also nowhere in plaintext.
         assert!(
             !contains(blob, &secret_raw),
-            "raw 32-byte secret просочился в relay/возврат"
+            "raw 32-byte secret leaked into a relay/return"
         );
     }
-    // account_id/fingerprint — детерминированные публичные строки (hex), не байты ключа.
+    // account_id/fingerprint — deterministic public strings (hex), not key bytes.
     assert!(hex::decode(&aid).is_ok());
     assert_eq!(fp.len(), 64);
     assert!(members
         .iter()
         .all(|m| hex::decode(&m.ed25519_pub_hex).is_ok()));
 
-    // На диске (после операций) — нет plaintext-приватника keyset/SSH и нет raw
-    // Secret Key байт.
+    // On disk (after the operations) — no plaintext keyset/SSH private key and no raw
+    // Secret Key bytes.
     core.lock();
     let db = std::fs::read(dir.path().join("inst.db")).unwrap();
     let keyset = std::fs::read(dir.path().join("keyset.bin")).unwrap();
     assert!(!contains(&db, marker));
     assert!(!contains(&keyset, marker));
-    assert!(!contains(&db, &secret_raw), "raw Secret Key в БД на диске");
+    assert!(
+        !contains(&db, &secret_raw),
+        "raw Secret Key in the on-disk DB"
+    );
     assert!(
         !contains(&keyset, &secret_raw),
-        "raw Secret Key в keyset-сайдкаре на диске"
+        "raw Secret Key in the on-disk keyset sidecar"
     );
 }
 
@@ -730,12 +724,12 @@ fn new_methods_reject_bad_input_without_panic() {
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
 
-    // битый hex vault_id
+    // corrupt hex vault_id
     assert!(matches!(
         core.list_members("zz-not-hex".into()),
         Err(FfiError::Other { .. })
     ));
-    // битый hex/длина pubkey
+    // corrupt hex/length pubkey
     let vid = core
         .create_cloud_vault("B".into(), TENANT.to_string())
         .unwrap();
@@ -748,11 +742,11 @@ fn new_methods_reject_bad_input_without_panic() {
         ),
         Err(FfiError::Other { .. })
     ));
-    // member_fingerprint с битым ключом
+    // member_fingerprint with a corrupt key
     assert!(core.member_fingerprint("nope".into()).is_err());
-    // rotate без членства (волт без manifest) → типизированная ошибка, не паника
+    // rotate without membership (a vault without a manifest) → a typed error, not a panic
     assert!(core.rotate_vk(vid.clone(), vec![]).is_err());
-    // битый hex author в audit_append
+    // corrupt hex author in audit_append
     assert!(matches!(
         core.audit_append(vid, b"e".to_vec(), b"s".to_vec(), "zz".into()),
         Err(FfiError::Other { .. })
@@ -765,12 +759,12 @@ fn e2e_cloud_membership_lifecycle() {
     let core = new_core(dir.path());
     core.create_account(Some("pw".to_string())).unwrap();
 
-    // 1) cloud-волт
+    // 1) cloud vault
     let vid = core
         .create_cloud_vault("Project X".to_string(), TENANT.to_string())
         .unwrap();
 
-    // 2) добавить двух членов
+    // 2) add two members
     let alice_ed = "a1".repeat(32);
     let alice_x = "a2".repeat(32);
     let bob_ed = "b1".repeat(32);
@@ -790,7 +784,7 @@ fn e2e_cloud_membership_lifecycle() {
     )
     .unwrap();
 
-    // 3) список: owner + alice + bob, fingerprints на месте
+    // 3) list: owner + alice + bob, fingerprints present
     let members = core.list_members(vid.clone()).unwrap();
     assert_eq!(members.len(), 3);
     assert!(members.iter().all(|m| m.fingerprint.len() == 64));
@@ -798,7 +792,7 @@ fn e2e_cloud_membership_lifecycle() {
     // 4) verify_chain ok
     assert!(core.verify_chain(vid.clone()).unwrap().ok);
 
-    // 5) ротация: оставить только alice (Admin), отозвать bob
+    // 5) rotation: keep only alice (Admin), revoke bob
     let new_epoch = core
         .rotate_vk(
             vid.clone(),
@@ -812,19 +806,19 @@ fn e2e_cloud_membership_lifecycle() {
     assert!(new_epoch >= 2);
     assert!(core.verify_chain(vid.clone()).unwrap().ok);
 
-    // bob отозван, alice осталась, owner остался
+    // bob revoked, alice remained, owner remained
     let after = core.list_members(vid.clone()).unwrap();
     assert!(after.iter().all(|m| m.ed25519_pub_hex != bob_ed));
     assert!(after.iter().any(|m| m.ed25519_pub_hex == alice_ed));
 
-    // 6) purge → волт исчез
+    // 6) purge → the vault is gone
     core.purge_vault(vid.clone()).unwrap();
     assert!(core
         .list_vaults()
         .unwrap()
         .iter()
         .all(|v| v.name != "Project X"));
-    // verify_chain на удалённом → NotFound (через Vault::open)
+    // verify_chain on a deleted vault → NotFound (via Vault::open)
     assert!(matches!(
         core.verify_chain(vid),
         Err(unissh_ffi::FfiError::NotFound)
@@ -841,13 +835,13 @@ fn build_registration_request_matches_signature_and_payload_shape() {
     // payload = u16 len(account_id=16) || account_id(16) || x25519(32) || ed25519(32)
     assert_eq!(req.payload.len(), 2 + 16 + 32 + 32);
     assert_eq!(u16::from_be_bytes([req.payload[0], req.payload[1]]), 16);
-    // Подпись = тот же блоб, что отдаёт sig-only метод (подписывается тот же
-    // канонический payload) — гарантия, что payload и signature согласованы.
+    // Signature = the same blob the sig-only method returns (the same canonical
+    // payload is signed) — a guarantee that payload and signature are consistent.
     let sig_only = core.build_registration().unwrap();
     assert_eq!(req.signature, sig_only);
     assert_eq!(req.signature.len(), 67); // header(3) + ed25519 sig(64)
 
-    // на заблокированном ядре — Locked
+    // on a locked core — Locked
     core.lock();
     assert!(matches!(
         core.build_registration_request(),
@@ -861,8 +855,8 @@ fn sign_server_challenge_raw_matches_string_variant_and_accepts_non_utf8() {
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
 
-    // Для UTF-8-safe значений raw-вариант обязан давать ту же (детерминированную
-    // Ed25519) подпись, что и строковый — он лишь снимает требование UTF-8 на id.
+    // For UTF-8-safe values the raw variant must produce the same (deterministic
+    // Ed25519) signature as the string one — it only drops the UTF-8 requirement on id.
     let s = core
         .sign_server_challenge(
             "h".to_string(),
@@ -886,8 +880,8 @@ fn sign_server_challenge_raw_matches_string_variant_and_accepts_non_utf8() {
     assert_eq!(s, r);
     assert_eq!(r.len(), 67);
 
-    // raw-вариант принимает НЕ-UTF8 идентификаторы (случайные 16 байт сервера).
-    let non_utf8 = vec![0u8, 159, 146, 150]; // невалидный UTF-8
+    // the raw variant accepts NON-UTF8 identifiers (the server's random 16 bytes).
+    let non_utf8 = vec![0u8, 159, 146, 150]; // invalid UTF-8
     let sig = core
         .sign_server_challenge_raw(
             non_utf8.clone(),
@@ -920,8 +914,8 @@ fn vault_info_exposes_sync_target_and_tenant() {
     assert_eq!(local.sync_target, FfiSyncTarget::Local);
     assert_eq!(cloud.sync_target, FfiSyncTarget::Cloud);
     assert_eq!(cloud.vault_id, cloud_hex);
-    // 1:1-binding: local-волт не привязан; cloud-волт привязан к TENANT (UI
-    // показывает связанный сервер).
+    // 1:1 binding: the local vault is not bound; the cloud vault is bound to TENANT (the UI
+    // shows the associated server).
     assert_eq!(local.sync_tenant, None);
     assert_eq!(cloud.sync_tenant, Some(TENANT.to_string()));
 }
@@ -931,7 +925,7 @@ fn create_cloud_vault_requires_active_server() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
-    // Пустой tenant (нет активного сервера) → отказ с понятной ошибкой.
+    // Empty tenant (no active server) → refusal with a clear error.
     assert!(matches!(
         core.create_cloud_vault("X".to_string(), String::new()),
         Err(unissh_ffi::FfiError::Other { .. })
@@ -944,13 +938,13 @@ fn bind_unbound_cloud_vaults_binds_legacy_and_is_idempotent() {
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
 
-    // Симулируем legacy: cloud-волт «без сервера» — создаём с одним tenant, затем
-    // имитируем пустую привязку нельзя напрямую через ffi, поэтому проверяем штатно:
-    // волт создан под TENANT → bind на ДРУГОЙ tenant ничего не меняет (уже привязан).
+    // Simulate legacy: a cloud vault "without a server" — create it with one tenant; then,
+    // since an empty binding can't be produced directly via ffi, we test the normal path:
+    // the vault is created under TENANT → binding to a DIFFERENT tenant changes nothing (already bound).
     core.create_cloud_vault("Legacy".to_string(), TENANT.to_string())
         .unwrap();
     let other = "b3RoZXItdGVuYW50"; // base64("other-tenant")
-                                    // Уже привязанный волт не перепривязывается → 0 затронуто.
+                                    // An already-bound vault is not re-bound → 0 affected.
     assert_eq!(
         core.bind_unbound_cloud_vaults(other.to_string()).unwrap(),
         0
@@ -963,7 +957,7 @@ fn bind_unbound_cloud_vaults_binds_legacy_and_is_idempotent() {
         .unwrap();
     assert_eq!(v.sync_tenant, Some(TENANT.to_string()));
 
-    // Пустой tenant отвергается.
+    // An empty tenant is rejected.
     assert!(core.bind_unbound_cloud_vaults(String::new()).is_err());
 }
 
@@ -976,11 +970,11 @@ fn sync_push_skips_vault_bound_to_other_tenant() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     core.create_account(None).unwrap();
-    // Волт привязан к TENANT.
+    // The vault is bound to TENANT.
     core.create_cloud_vault("Bound".to_string(), TENANT.to_string())
         .unwrap();
 
-    // Синк с ДРУГИМ tenant: волт не пушится (привязан к другому серверу).
+    // Sync with a DIFFERENT tenant: the vault is not pushed (bound to another server).
     let backend = Arc::new(AppTransport {
         inner: Mutex::new(InMemoryTransport::new()),
     });

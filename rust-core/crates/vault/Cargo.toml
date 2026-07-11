@@ -1,7 +1,7 @@
 [package]
 name = "unissh-vault"
 version = "0.1.0"
-description = "Локальные волты UniSSH: Vault Key, per-item ключи, шифрование items с associated-data привязкой (ТЗ 5.2–5.3, локальная часть)."
+description = "UniSSH local vaults: Vault Key, per-item keys, item encryption with associated-data binding (spec 5.2–5.3, the local part)."
 readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
