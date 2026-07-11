@@ -1,79 +1,79 @@
 # UniSSH Core (Rust)
 
-Универсальное Rust-ядро UniSSH — опенсорсного self-hosted
-кроссплатформенного SSH-клиента с zero-knowledge шифрованными волтами.
-**Этот репозиторий — только ядро** (библиотека): без сервера, без UI. Собирается
-и тестируется автономно (без сети).
+The universal UniSSH Rust core — an open-source, self-hosted,
+cross-platform SSH client with zero-knowledge encrypted vaults.
+**This repository is the core only** (a library): no server, no UI. It builds
+and tests standalone (offline).
 
-## Карта крейтов (Веха 1, шаги 1–7)
+## Crate map (Milestone 1, steps 1–7)
 
 ```
 crates/
-  crypto         примитивы, envelope-обёртки, AEAD+associated data, подписи,
-                 версионирование блобов (crypto agility)            [ТЗ 5.4–5.5]
-  keychain       Secret Key, Argon2id, Unlock Key, личный keyset    [ТЗ 5.1]
-  storage        SQLite+SQLCipher, изоляция инстансов, модель синка  [ТЗ 2A, 9]
-  vault          local-волт, Vault Key, per-item ключи              [ТЗ 5.2–5.3]
-  ssh-agent      встроенный in-memory агент, mlock/zeroize           [ТЗ 10.1]
-  ssh-transport  russh: ProxyJump, форварды, TOFU, ssh-config        [ТЗ 10.4]
-  ffi            UniFFI-контракт для UI (без plaintext-ключей)       [ТЗ 4]
-  cli            временный CLI-харнесс «пощупать ядро»
+  crypto         primitives, envelope wrappers, AEAD+associated data, signatures,
+                 blob versioning (crypto agility)                    [SPEC 5.4–5.5]
+  keychain       Secret Key, Argon2id, Unlock Key, personal keyset   [SPEC 5.1]
+  storage        SQLite+SQLCipher, instance isolation, sync model     [SPEC 2A, 9]
+  vault          local vault, Vault Key, per-item keys               [SPEC 5.2–5.3]
+  ssh-agent      built-in in-memory agent, mlock/zeroize              [SPEC 10.1]
+  ssh-transport  russh: ProxyJump, forwards, TOFU, ssh-config         [SPEC 10.4]
+  ffi            UniFFI contract for the UI (no plaintext keys)       [SPEC 4]
+  cli            temporary CLI harness to "kick the tires" on the core
 ```
 
-Каждый крейт — со своим README, документированным публичным API и тестами
-(включая негативные). Зависимости снизу вверх; верхние переиспользуют нижние.
+Every crate ships its own README, a documented public API, and tests
+(including negative ones). Dependencies flow bottom-up; higher layers reuse lower ones.
 
-Веха 1 (шаги 1–7, Definition of Done из ТЗ) **выполнена**; поверх неё ядро
-расширено набором локальных возможностей (см. ниже) — без сервера, сети и
-нарушения жёстких правил.
+Milestone 1 (steps 1–7, the Definition of Done from the SPEC) is **complete**; on
+top of it the core has been extended with a set of local capabilities (see below) —
+without a server, networking, or breaking the hard rules.
 
-## Возможности ядра
+## Core capabilities
 
-Всё — локально, на существующих крейтах, в sync-ready формате блобов.
+Everything is local, built on the existing crates, in a sync-ready blob format.
 
-- **Секреты в волте** (item-типы): SSH-ключи (генерация/импорт) и user-сертификаты,
-  профили соединений («хосты»), **пароли серверов**, **зашифрованные заметки**,
-  **группы хостов** (вложенные). Reveal паролей/заметок — строго type-gated
-  (приватный ключ через него не достать).
-- **История версий секретов** — прошлые версии пароля/заметки архивируются
-  (ретеншн на item), reveal любой версии; история чистится при удалении.
-- **Аутентификация:** ключом (через встроенный агент, приватник не покидает ядро),
-  паролем (inline / из волта) с фолбэком на `keyboard-interactive`, сертификатом.
-- **SSH-сессии:** интерактивный PTY с ресайзом; **потоковый exec** (раздельные
-  stdout/stderr); **авто-reconnect** (backoff, MITM-стоп).
-- **Fleet-операции:** мульти-хост exec с лимитом конкуренции и per-host таймаутом;
-  запуск по **группе**, по **тегам**, dry-run; **broadcast** (один ввод → N PTY,
-  cluster-ssh); **fleet-push** файла на много хостов по SFTP.
-- **SFTP:** полный набор + **возобновляемые** download/upload с прогрессом и отменой.
-- **Туннели:** local / remote / dynamic (SOCKS5), ProxyJump-цепочки.
-- **Целостность/аудит:** `verify_chain` (проверка подписей всех версий, вкл.
-  историю и tombstones) и `check_consistency` (структурная проверка БД) — без
-  утечки секретов в отчёт.
-- **Интероп:** импорт/экспорт `~/.ssh/config`, импорт `~/.ssh/known_hosts` и
-  сессий **PuTTY** (`.reg`).
-- **Бэкап:** портативный зашифрованный **экспорт/импорт волта** (passphrase +
-  Argon2id), пере-шифрование под ключи целевого инстанса при импорте.
+- **Secrets in the vault** (item types): SSH keys (generate/import) and user certificates,
+  connection profiles ("hosts"), **server passwords**, **encrypted notes**,
+  **host groups** (nested). Revealing passwords/notes is strictly type-gated
+  (a private key can never be extracted through it).
+- **Secret version history** — past versions of a password/note are archived
+  (per-item retention), reveal any version; history is purged on deletion.
+- **Authentication:** by key (via the built-in agent, the private key never leaves the core),
+  by password (inline / from the vault) with a fallback to `keyboard-interactive`, by certificate.
+- **SSH sessions:** interactive PTY with resize; **streaming exec** (separate
+  stdout/stderr); **auto-reconnect** (backoff, MITM stop).
+- **Fleet operations:** multi-host exec with a concurrency limit and per-host timeout;
+  run by **group**, by **tags**, dry-run; **broadcast** (one input → N PTYs,
+  cluster-ssh); **fleet-push** of a file to many hosts over SFTP.
+- **SFTP:** full set + **resumable** download/upload with progress and cancellation.
+- **Tunnels:** local / remote / dynamic (SOCKS5), ProxyJump chains.
+- **Integrity/audit:** `verify_chain` (verifies the signatures of all versions, incl.
+  history and tombstones) and `check_consistency` (structural DB check) — without
+  leaking secrets into the report.
+- **Interop:** import/export of `~/.ssh/config`, import of `~/.ssh/known_hosts` and
+  **PuTTY** sessions (`.reg`).
+- **Backup:** portable encrypted **vault export/import** (passphrase +
+  Argon2id), re-encryption under the target instance's keys on import.
 
-## Сборка и тесты
+## Build and tests
 
 ```bash
 cargo build --workspace
-cargo test  --workspace          # ~194 теста (вкл. интеграционные против sshd)
+cargo test  --workspace          # ~194 tests (incl. integration against sshd)
 ```
 
-Требования: Rust 1.74+, C-тулчейн и системный OpenSSL (для bundled SQLCipher).
-Интеграционные тесты `ssh-transport`/`ffi` поднимают локальный `sshd`
-(нужны `sshd`/`ssh-keygen`).
+Requirements: Rust 1.74+, a C toolchain, and system OpenSSL (for bundled SQLCipher).
+The `ssh-transport`/`ffi` integration tests spin up a local `sshd`
+(`sshd`/`ssh-keygen` required).
 
-## Сборка и CI
+## Build and CI
 
-Часть монорепо [`goduni/unissh`](https://github.com/goduni/unissh): корневой
-Cargo-workspace собирает ядро вместе с сервером, задачи оркеструет `just`
-(`just build`, `just test`, `just lint`). CI в корне репозитория на каждый push/PR
-прогоняет rustfmt, clippy и тесты (Linux, с локальным `sshd` для интеграционных)
-плюс cargo-deny.
+Part of the [`goduni/unissh`](https://github.com/goduni/unissh) monorepo: the root
+Cargo workspace builds the core together with the server, and tasks are orchestrated by `just`
+(`just build`, `just test`, `just lint`). CI at the repository root runs rustfmt,
+clippy, and the tests on every push/PR (Linux, with a local `sshd` for the integration
+tests) plus cargo-deny.
 
-## Сквозной сценарий (локально, без сервера)
+## End-to-end scenario (local, no server)
 
 ```bash
 SK=$(cargo run -p unissh-cli -- init --password pw | tail -1)   # Secret Key (Emergency Kit)
@@ -81,39 +81,39 @@ cargo run -p unissh-cli -- create-vault --secret-key $SK --password pw --id defa
 cargo run -p unissh-cli -- gen-key      --secret-key $SK --password pw --vault default --item id_ed25519
 cargo run -p unissh-cli -- exec --secret-key $SK --password pw --vault default --item id_ed25519 \
     --host 10.0.0.5 --user deploy --command "uname -a" --jump bastion:22:admin:id_ed25519
-# интерактивный терминал (PTY):
+# interactive terminal (PTY):
 cargo run -p unissh-cli -- shell --secret-key $SK --password pw --vault default --item id_ed25519 \
     --host 10.0.0.5 --user deploy
 ```
 
-Аутентификация идёт через `russh::auth::Signer` поверх встроенного агента —
-приватный ключ не покидает агент. Интерактивная сессия (`open_session`/`SshSession`)
-стримит вывод через callback `SessionObserver`.
+Authentication goes through `russh::auth::Signer` on top of the built-in agent —
+the private key never leaves the agent. The interactive session (`open_session`/`SshSession`)
+streams output through the `SessionObserver` callback.
 
-## Гарантии безопасности
+## Security guarantees
 
-Своя крипта не пишется (RustCrypto/`hpke`/SQLCipher). Секреты зануляются;
-plaintext приватных ключей на диск не пишется; страницы с ключом по возможности
-`mlock`. Граница ядро↔UI **не отдаёт plaintext-ключи** — единственное
-согласованное исключение — reveal паролей/заметок (пользовательские секреты, не
-ключевой материал), строго type-gated. Версионирование блобов, подписанные
-монотонные версии, tombstones и associated-data привязка заложены сразу под
-будущий синк; те же подписи проверяет локальный аудит целостности (`verify_chain`).
-Зашифрованный бэкап волта — портативный файл под passphrase (Argon2id), не синк.
-Подробности — в README крейтов.
+No custom crypto is written (RustCrypto/`hpke`/SQLCipher). Secrets are zeroized;
+plaintext private keys are never written to disk; pages holding a key are `mlock`ed
+where possible. The core↔UI boundary **never hands out plaintext keys** — the only
+sanctioned exception is revealing passwords/notes (user secrets, not key
+material), strictly type-gated. Blob versioning, signed monotonic versions,
+tombstones, and associated-data binding are built in from the start for
+future sync; the same signatures are verified by the local integrity audit (`verify_chain`).
+The encrypted vault backup is a portable, passphrase-protected file (Argon2id), not sync.
+See the crate READMEs for details.
 
-## Что НЕ здесь
+## What is NOT here
 
-Сервер-инстанс, сетевой синк, UI и всё ⏳ ПОТОМ из ТЗ (CA, relay, шеринг между
-людьми, ротация VK, device-bound/FIDO2, key transparency, PQ-гибрид, CRDT,
-P2P) — отдельные вехи. Точки расширения под них заложены, реализация — нет.
+The server instance, network sync, the UI, and everything marked ⏳ LATER in the SPEC (CA, relay,
+sharing between people, VK rotation, device-bound/FIDO2, key transparency, PQ hybrid, CRDT,
+P2P) are separate milestones. The extension points for them are in place, but the implementation is not.
 
-## Лицензия
+## License
 
-Двойная лицензия — на выбор пользователя:
+Dual-licensed at the user's option:
 
 - MIT ([`LICENSE-MIT`](./LICENSE-MIT))
 - Apache 2.0 ([`LICENSE-APACHE`](./LICENSE-APACHE))
 
-`SPDX-License-Identifier: MIT OR Apache-2.0`. Любой вклад принимается на условиях
-этой двойной лицензии без дополнительных оговорок (Apache-2.0 §5).
+`SPDX-License-Identifier: MIT OR Apache-2.0`. Any contribution is accepted under the terms
+of this dual license without additional stipulations (Apache-2.0 §5).
