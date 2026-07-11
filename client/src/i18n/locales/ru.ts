@@ -330,6 +330,7 @@ export const ru = {
     "queued": "в очереди",
     "running": "выполняется…",
     "exit": "exit {{code}}",
+    "timedOut": "таймаут",
     "noOutput": "(нет вывода)",
     "commandPlaceholder": "команда для всех хостов…",
     "stopOnError": "остановить при ошибке",

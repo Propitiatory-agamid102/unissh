@@ -174,12 +174,17 @@ const HostTile = React.memo(function HostTile({
         {result && (
           <span
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
               fontFamily: MONO,
               fontSize: 11,
               color: timedOut ? p.amber : result.exitStatus === 0 ? p.green : p.red,
             }}
           >
-            {t("fleet.exit", { code: result.exitStatus })} · {fmtDuration(result.durationMs)}
+            <Icon name={!timedOut && result.exitStatus === 0 ? "check" : "x"} size={12} />
+            {timedOut ? t("fleet.timedOut") : t("fleet.exit", { code: result.exitStatus })} ·{" "}
+            {fmtDuration(result.durationMs)}
           </span>
         )}
       </div>

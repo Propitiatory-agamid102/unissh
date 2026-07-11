@@ -297,6 +297,7 @@ export const en = {
     "queued": "queued",
     "running": "running…",
     "exit": "exit {{code}}",
+    "timedOut": "timed out",
     "noOutput": "(no output)",
     "commandPlaceholder": "command for all hosts…",
     "stopOnError": "stop on error",
