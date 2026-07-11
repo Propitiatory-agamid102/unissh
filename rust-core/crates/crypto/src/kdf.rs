@@ -13,6 +13,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::{OsRng, RngCore};
+use zeroize::Zeroize;
 
 use crate::error::CryptoError;
 use crate::keys::{SymmetricKey, SYMMETRIC_KEY_LEN};
@@ -166,6 +167,6 @@ pub fn derive_key(password: &[u8], params: &KdfParams) -> Result<SymmetricKey, C
         .hash_password_into(password, &params.salt, &mut out)
         .map_err(|_| CryptoError::Kdf)?;
     let key = SymmetricKey::from_bytes(out);
-    out.iter_mut().for_each(|b| *b = 0);
+    out.zeroize();
     Ok(key)
 }

@@ -1290,12 +1290,7 @@ fn checked_version(v: u64) -> Result<i64, StorageError> {
 
 /// Encodes bytes as hex (ids are open metadata; the report holds no secrets).
 fn to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    hex::encode(bytes)
 }
 
 /// Current unix time (secs). Pre-epoch/broken clocks → 0 (the timestamp is informational).
