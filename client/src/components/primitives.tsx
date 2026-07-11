@@ -134,32 +134,63 @@ export function Icon({
 }
 
 // ── Primitives ─────────────────────────────────────────────────
-export type Status = "online" | "offline" | "unknown";
+// online = solid green · connecting = a hollow amber RING (shape carries the
+// transitional state so colour is never the sole carrier) · error = solid red ·
+// offline / unknown = neutral. Glow defaults OFF (decorative rings are out in the
+// mono system); pass glow to opt back in.
+export type Status = "online" | "connecting" | "offline" | "error" | "unknown";
 export const STATUS_COLOR = (p: Palette, s: Status) =>
-  s === "online" ? p.green : s === "offline" ? p.red : p.txt3;
+  s === "online" ? p.green : s === "connecting" ? p.amber : s === "error" ? p.red : p.txt3;
 
+/** The one canonical status indicator. Shape (solid vs hollow ring) distinguishes
+ *  connecting from settled states; pass `label` to render the paired status word,
+ *  or `srLabel` for an accessible name when the dot stands alone (dense rows,
+ *  avatars, the collapsed rail). */
 export function StatusDot({
   status,
   size = 8,
-  glow = true,
+  label,
+  srLabel,
+  glow = false,
 }: {
   status: Status;
   size?: number;
+  label?: React.ReactNode;
+  srLabel?: string;
   glow?: boolean;
 }) {
   const p = usePalette();
   const c = STATUS_COLOR(p, status);
-  return (
+  const ring = status === "connecting";
+  const dot = (
     <span
+      aria-hidden
       style={{
         width: size,
         height: size,
         borderRadius: "50%",
-        background: c,
+        background: ring ? "transparent" : c,
+        border: ring ? `2px solid ${c}` : "none",
+        boxSizing: "border-box",
         flexShrink: 0,
-        boxShadow: glow && status === "online" ? `0 0 0 3px ${c}22, 0 0 7px ${c}99` : "none",
+        boxShadow: glow && status === "online" ? `0 0 0 3px ${c}22` : "none",
       }}
     />
+  );
+  if (label == null) {
+    return srLabel ? (
+      <span role="img" aria-label={srLabel} style={{ display: "inline-flex" }}>
+        {dot}
+      </span>
+    ) : (
+      dot
+    );
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {dot}
+      <span style={{ color: c, fontWeight: 600 }}>{label}</span>
+    </span>
   );
 }
 
