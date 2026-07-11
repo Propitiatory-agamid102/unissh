@@ -255,6 +255,10 @@ export const en = {
       "newTunnelSub": "port forwarding",
       "import": "Import ~/.ssh/config",
       "importSub": "add hosts from a file",
+      "groups": "Manage groups",
+      "groupsSub": "organize hosts",
+      "sync": "Sync vault",
+      "syncSub": "pull + push now",
       "lock": "Lock instance",
       "lockSub": "zero out secrets"
     },

@@ -22,7 +22,7 @@ interface ActionCmd {
   icon: IconName;
   labelKey: string;
   subKey: string;
-  action: "newhost" | "newkey" | "newtunnel" | "import" | "lock";
+  action: "newhost" | "newkey" | "newtunnel" | "import" | "groups" | "sync" | "lock";
 }
 
 const CMD_NAV: NavCmd[] = [
@@ -44,6 +44,8 @@ const CMD_ACTIONS: ActionCmd[] = [
   { id: "a-newkey", icon: "key", labelKey: "command.action.newKey", subKey: "command.action.newKeySub", action: "newkey" },
   { id: "a-newtunnel", icon: "branch", labelKey: "command.action.newTunnel", subKey: "command.action.newTunnelSub", action: "newtunnel" },
   { id: "a-import", icon: "download", labelKey: "command.action.import", subKey: "command.action.importSub", action: "import" },
+  { id: "a-groups", icon: "layers", labelKey: "command.action.groups", subKey: "command.action.groupsSub", action: "groups" },
+  { id: "a-sync", icon: "refresh", labelKey: "command.action.sync", subKey: "command.action.syncSub", action: "sync" },
   { id: "a-lock", icon: "lock", labelKey: "command.action.lock", subKey: "command.action.lockSub", action: "lock" },
 ];
 
@@ -136,6 +138,8 @@ export function CommandPalette() {
       else if (it.action === "newkey") ctx.openModal({ kind: "key" });
       else if (it.action === "newtunnel") ctx.openModal({ kind: "tunnel" });
       else if (it.action === "import") ctx.openImport();
+      else if (it.action === "groups") ctx.openGroups();
+      else if (it.action === "sync") void ctx.reloadVault();
       else if (it.action === "lock") ctx.onLock();
     }
   };
