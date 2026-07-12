@@ -190,6 +190,7 @@ function HostRow({
   selected,
   active,
   session,
+  first,
   onToggle,
   onOpen,
   onConnect,
@@ -198,6 +199,7 @@ function HostRow({
   selected: boolean;
   active: boolean;
   session: boolean;
+  first?: boolean;
   onToggle: () => void;
   onOpen: () => void;
   onConnect: () => void;
@@ -224,12 +226,13 @@ function HostRow({
         display: "flex",
         alignItems: "center",
         gap: 12,
-        padding: "0 12px",
+        padding: "0 4px",
         height: 46,
         cursor: "pointer",
-        borderRadius: 10,
-        background: active ? p.bg3 : selected ? p.accentSoft : hover ? p.bg1 : "transparent",
-        boxShadow: active ? `inset 2.5px 0 0 ${p.accent}` : "none",
+        // Hairline row: no per-row box/radius/side-stripe. Selection = faint neutral
+        // fill; rows share one 1px line between them (all but the first).
+        borderTop: first ? "none" : `1px solid ${p.line}`,
+        background: active || selected ? p.bg2 : hover ? p.bg2 : "transparent",
       }}
     >
       <Checkbox
@@ -422,11 +425,11 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
               alignItems: "center",
               gap: 3,
               fontSize: 11,
-              color: p.purple,
+              color: p.txt3,
               flexShrink: 0,
             }}
           >
-            <Icon name="branch" size={12} color={p.purple} />
+            <Icon name="branch" size={12} color={p.txt3} />
             {t("hosts.jump")}
           </span>
         )}
@@ -443,7 +446,7 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
               borderRadius: 7,
               border: `1px solid ${p.line}`,
               background: p.bg2,
-              color: p.purple,
+              color: p.txt3,
               cursor: "pointer",
               display: "flex",
               alignItems: "center",
@@ -595,10 +598,9 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
         onKeyDown={pressActivate(() => ctx.go("known"))}
         onClick={() => ctx.go("known")}
         style={{
-          padding: 11,
-          borderRadius: 10,
-          background: p.bg2,
-          border: `1px solid ${p.line}`,
+          padding: "12px 0 2px",
+          borderTop: `1px solid ${p.line}`,
+          background: "transparent",
           cursor: "pointer",
         }}
       >
@@ -656,7 +658,7 @@ function SessionsRail() {
       )}
       {live.map((t) => {
         const online = t.status === "online";
-        const color = online ? p.green : p.accent;
+        const color = online ? p.green : p.amber;
         const statusLabel = tr(online ? "terminal.status.online" : "terminal.status.connecting");
         return (
           <div
@@ -675,27 +677,14 @@ function SessionsRail() {
             }}
             style={{
               padding: 12,
-              borderRadius: 13,
-              background: p.bg1,
+              borderRadius: 12,
+              background: p.bg0,
               border: `1px solid ${p.line}`,
               position: "relative",
               overflow: "hidden",
               cursor: "pointer",
             }}
           >
-            <div
-              style={{
-                position: "absolute",
-                top: -24,
-                right: -16,
-                width: 70,
-                height: 70,
-                borderRadius: "50%",
-                background: color,
-                opacity: 0.1,
-                filter: "blur(16px)",
-              }}
-            />
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {/* shape carries the state too: solid = online, hollow = connecting */}
               <span
@@ -706,8 +695,6 @@ function SessionsRail() {
                   background: online ? color : "transparent",
                   border: online ? "none" : `1.5px solid ${color}`,
                   boxSizing: "border-box",
-                  boxShadow: `0 0 7px ${color}`,
-                  animation: "uhPulse 1.6s ease-in-out infinite",
                 }}
               />
               <span style={{ fontSize: 13, fontWeight: 700 }}>{t.title}</span>
@@ -778,7 +765,7 @@ function SessionsRail() {
       {tunnels.length === 0 && (
         <div style={{ fontSize: 11.5, color: p.txt3 }}>{tr("hosts.noOpenTunnels")}</div>
       )}
-      {tunnels.map((t) => (
+      {tunnels.map((t, i) => (
         <div
           key={t.id}
           role="button"
@@ -791,14 +778,13 @@ function SessionsRail() {
             display: "flex",
             alignItems: "center",
             gap: 9,
-            padding: "9px 11px",
-            borderRadius: 11,
-            background: p.bg2,
-            border: `1px solid ${p.line}`,
+            padding: "9px 2px",
+            borderTop: i === 0 ? "none" : `1px solid ${p.line}`,
+            background: "transparent",
             cursor: "pointer",
           }}
         >
-          <Icon name="branch" size={15} color={p.purple} />
+          <Icon name="branch" size={15} color={p.txt3} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600 }}>{t.label}</div>
             <div style={{ fontSize: 10.5, color: p.txt3 }}>{t.route}</div>
@@ -1238,40 +1224,21 @@ export function ViewHosts() {
       >
         <div
           style={{
-            position: "absolute",
-            top: -130,
-            left: "20%",
-            width: 420,
-            height: 280,
-            borderRadius: "50%",
-            background: p.accent,
-            opacity: p.name === "dark" ? 0.08 : 0.05,
-            filter: "blur(80px)",
-            pointerEvents: "none",
-          }}
-        />
-
-        <div
-          style={{
             position: "relative",
             display: "flex",
             alignItems: "center",
-            gap: 10,
-            padding: "16px 22px 12px",
+            gap: 12,
+            padding: "24px 22px 14px",
           }}
         >
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: -0.5 }}>
+          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: -0.7 }}>
             {t("hosts.title")}
           </h1>
           <span
             style={{
               fontFamily: MONO,
               fontSize: 12,
-              color: p.txt2,
-              background: p.bg2,
-              border: `1px solid ${p.line}`,
-              borderRadius: 20,
-              padding: "2px 9px",
+              color: p.txt3,
               whiteSpace: "nowrap",
             }}
           >
@@ -1315,9 +1282,9 @@ export function ViewHosts() {
                 height: 30,
                 padding: "0 10px",
                 borderRadius: 8,
-                border: `1px solid ${sortOpen ? p.accentLine : p.line}`,
-                background: sortOpen ? p.accentSoft : p.bg2,
-                color: sortOpen ? p.accent : p.txt2,
+                border: `1px solid ${p.line}`,
+                background: sortOpen ? p.bg3 : p.bg2,
+                color: p.txt2,
                 cursor: "pointer",
                 fontSize: 12.5,
                 fontWeight: 600,
@@ -1366,8 +1333,8 @@ export function ViewHosts() {
                       cursor: "pointer",
                       fontSize: 13,
                       fontWeight: sort === k ? 700 : 500,
-                      color: sort === k ? p.accent : p.txt2,
-                      background: sort === k ? p.accentSoft : "transparent",
+                      color: sort === k ? p.txt : p.txt2,
+                      background: "transparent",
                     }}
                     onMouseEnter={(e) => {
                       if (sort !== k) e.currentTarget.style.background = p.bg2;
@@ -1379,10 +1346,10 @@ export function ViewHosts() {
                     <Icon
                       name={k === "name" ? "list" : k === "connected" ? "clock" : "plus"}
                       size={15}
-                      color={sort === k ? p.accent : p.txt3}
+                      color={sort === k ? p.txt : p.txt3}
                     />
                     <span style={{ flex: 1 }}>{tDyn(`hosts.sort.${SORT_KEYS[k]}`)}</span>
-                    {sort === k && <Icon name="check" size={14} color={p.accent} />}
+                    {sort === k && <Icon name="check" size={14} color={p.txt} />}
                   </button>
                 ))}
               </div>
@@ -1423,8 +1390,8 @@ export function ViewHosts() {
           style={{
             position: "relative",
             display: "flex",
-            gap: 6,
-            padding: "0 22px 12px",
+            gap: 14,
+            padding: "0 22px 10px",
             alignItems: "center",
             flexWrap: "wrap",
           }}
@@ -1435,14 +1402,10 @@ export function ViewHosts() {
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                gap: 4,
-                fontSize: 12,
-                fontWeight: 600,
+                gap: 5,
+                fontSize: 13,
+                fontWeight: 700,
                 color: p.txt,
-                background: p.bg3,
-                border: `1px solid ${p.line2}`,
-                borderRadius: 20,
-                padding: "2px 4px 2px 10px",
               }}
             >
               {activeGroup.label}
@@ -1454,8 +1417,7 @@ export function ViewHosts() {
                   ...BTN_RESET,
                   display: "inline-flex",
                   alignItems: "center",
-                  padding: 3,
-                  borderRadius: "50%",
+                  padding: 2,
                   cursor: "pointer",
                   color: p.txt3,
                 }}
@@ -1466,20 +1428,23 @@ export function ViewHosts() {
           )}
           {[HOST_FILTER_ALL, ...tagSet].map((tag) => {
             const isAll = tag === HOST_FILTER_ALL;
+            const on = hostFilter === tag;
             return (
               <button
                 key={tag}
                 onClick={() => setHostFilter(tag)}
+                aria-pressed={on}
                 style={{
                   fontFamily: isAll ? UI : MONO,
-                  fontSize: 12,
+                  fontSize: 13,
                   fontWeight: 600,
                   cursor: "pointer",
-                  padding: "3px 10px",
-                  borderRadius: 20,
-                  border: `1px solid ${hostFilter === tag ? p.line2 : p.line}`,
-                  background: hostFilter === tag ? p.bg3 : "transparent",
-                  color: hostFilter === tag ? p.txt : p.txt2,
+                  padding: "2px 1px 5px",
+                  border: "none",
+                  borderRadius: 0,
+                  borderBottom: `2px solid ${on ? p.accent : "transparent"}`,
+                  background: "transparent",
+                  color: on ? p.txt : p.txt3,
                 }}
               >
                 {isAll ? t("common.all") : "#" + tag}
@@ -1489,15 +1454,17 @@ export function ViewHosts() {
           {hosts.some((x) => x.tags.length === 0) && (
             <button
               onClick={() => setHostFilter("__untagged")}
+              aria-pressed={hostFilter === "__untagged"}
               style={{
                 fontFamily: UI,
-                fontSize: 12,
+                fontSize: 13,
                 fontWeight: 600,
                 cursor: "pointer",
-                padding: "3px 10px",
-                borderRadius: 20,
-                border: `1px solid ${hostFilter === "__untagged" ? p.line2 : p.line}`,
-                background: hostFilter === "__untagged" ? p.bg3 : "transparent",
+                padding: "2px 1px 5px",
+                border: "none",
+                borderRadius: 0,
+                borderBottom: `2px solid ${hostFilter === "__untagged" ? p.accent : "transparent"}`,
+                background: "transparent",
                 color: hostFilter === "__untagged" ? p.txt : p.txt3,
               }}
             >
@@ -1508,15 +1475,16 @@ export function ViewHosts() {
             <button
               onClick={() => setSel(shown.map((x) => x.profileId))}
               style={{
-                marginLeft: 4,
-                fontSize: 12,
+                marginLeft: 2,
+                fontSize: 12.5,
                 fontWeight: 600,
                 cursor: "pointer",
-                padding: "3px 10px",
-                borderRadius: 20,
-                border: `1px dashed ${p.line2}`,
+                padding: 0,
+                border: "none",
                 background: "transparent",
                 color: p.txt2,
+                textDecoration: "underline",
+                textUnderlineOffset: 3,
               }}
             >
               {t("hosts.selectWholeGroup")}
@@ -1596,7 +1564,7 @@ export function ViewHosts() {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fill, minmax(248px, 1fr))",
-                gap: 12,
+                gap: 16,
               }}
             >
               {shown.map((h) => (
@@ -1613,14 +1581,15 @@ export function ViewHosts() {
               ))}
             </div>
           ) : (
-            <div className="uh-stagger" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              {shown.map((h) => (
+            <div className="uh-stagger" style={{ display: "flex", flexDirection: "column" }}>
+              {shown.map((h, i) => (
                 <HostRow
                   key={h.profileId}
                   h={h}
                   selected={sel.includes(h.profileId)}
                   active={open === h.profileId}
                   session={activeIds.has(h.profileId)}
+                  first={i === 0}
                   onToggle={() => toggle(h.profileId)}
                   onOpen={() => openHost(h.profileId)}
                   onConnect={() => ctx.connect(h)}
@@ -1639,9 +1608,9 @@ export function ViewHosts() {
               bottom: 16,
               height: 52,
               borderRadius: 13,
-              background: p.bg3,
-              border: `1px solid ${p.accentLine}`,
-              boxShadow: `0 -2px 30px -8px ${p.glow}, 0 12px 30px -12px rgba(0,0,0,0.5)`,
+              background: p.bg0,
+              border: `1px solid ${p.line2}`,
+              boxShadow: p.shadow,
               display: "flex",
               alignItems: "center",
               gap: 12,
@@ -1655,7 +1624,7 @@ export function ViewHosts() {
                 height: 26,
                 borderRadius: 8,
                 background: p.accent,
-                color: "#fff",
+                color: p.accentInk,
                 fontFamily: MONO,
                 fontWeight: 700,
                 fontSize: 13,
@@ -1697,10 +1666,9 @@ export function ViewHosts() {
               {t("nav.fleetExec")}
             </Btn>
             <Btn
-              variant="ghost"
+              variant="danger"
               size="sm"
               icon="trash"
-              style={{ color: p.red, borderColor: p.line2 }}
               onClick={() =>
                 ctx.confirm({
                   title: t("hosts.bulkDeleteTitle"),
@@ -1753,7 +1721,7 @@ export function ViewHosts() {
             width: railW,
             flexShrink: 0,
             position: "relative",
-            background: p.bg1,
+            background: p.bg0,
             borderLeft: `1px solid ${p.line}`,
             display: "flex",
             flexDirection: "column",
