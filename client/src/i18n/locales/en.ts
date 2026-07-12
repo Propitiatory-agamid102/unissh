@@ -387,6 +387,7 @@ export const en = {
     "sessionActive": "session active",
     "noActiveSession": "no active session",
     "openSession": "Open session",
+    "openSftp": "Open SFTP",
     "terminal": "Terminal",
     "jump": "jump",
     "tags": "Tags",

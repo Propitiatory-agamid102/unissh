@@ -518,14 +518,17 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
         <Btn
           variant="ghost"
           icon="bolt"
+          title={t("nav.fleetExec")}
           style={{ padding: "8px 11px" }}
           onClick={() => ctx.go("fleet")}
         />
+        {/* Quick SFTP: connect + jump straight to the SFTP view for this host. */}
         <Btn
           variant="ghost"
           icon="folders"
+          title={t("hosts.openSftp")}
           style={{ padding: "8px 11px" }}
-          onClick={() => ctx.go("sftp")}
+          onClick={() => void ctx.connectSftp(h)}
         />
       </div>
 

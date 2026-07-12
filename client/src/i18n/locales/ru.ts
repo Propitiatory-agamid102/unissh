@@ -421,6 +421,7 @@ export const ru = {
     "sessionActive": "сессия активна",
     "noActiveSession": "нет активной сессии",
     "openSession": "Открыть сессию",
+    "openSftp": "Открыть SFTP",
     "terminal": "Терминал",
     "jump": "переход",
     "tags": "Теги",
