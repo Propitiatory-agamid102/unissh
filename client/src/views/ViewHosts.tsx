@@ -71,6 +71,7 @@ function HostCard({
     <Card
       active={active || selected}
       onClick={onOpen}
+      onDoubleClick={onConnect}
       // not a <button>: the card nests interactive controls (checkbox, Connect)
       role="button"
       tabIndex={0}
@@ -140,7 +141,8 @@ function HostCard({
         {h.user ? `${h.user}@${h.host}` : h.host}
       </div>
 
-      {/* L3 — status · auth (one mono line; colour only on meaning) */}
+      {/* L3 — status · auth (one mono line; colour only on meaning). Fades on hover
+          so the hover Connect button never sits over the text. */}
       <div
         style={{
           display: "flex",
@@ -150,6 +152,8 @@ function HostCard({
           fontSize: 11.5,
           color: p.txt3,
           marginTop: 16,
+          opacity: show ? 0 : 1,
+          transition: "opacity .12s ease",
         }}
       >
         {session ? (
@@ -220,6 +224,7 @@ function HostRow({
         if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocusIn(false);
       }}
       onClick={onOpen}
+      onDoubleClick={onConnect}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -400,8 +405,6 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
             borderRadius: "50%",
             flexShrink: 0,
             background: session ? p.green : p.line2,
-            boxShadow: session ? `0 0 7px ${p.green}` : "none",
-            animation: session ? "uhPulse 1.6s ease-in-out infinite" : "none",
           }}
         />
         <h3
@@ -510,7 +513,7 @@ function HostDetail({ h, session }: { h: ConnectionProfile; session: boolean }) 
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <Btn icon="terminal" style={{ flex: 1 }} onClick={() => ctx.connect(h)}>
-          {session ? t("hosts.openSession") : t("hosts.terminal")}
+          {t("hosts.connect")}
         </Btn>
         <Btn
           variant="ghost"
