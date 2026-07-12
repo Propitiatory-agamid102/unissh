@@ -268,9 +268,11 @@ function NavItem({
         padding: sub ? "0 18px 0 30px" : "0 18px",
         borderRadius: 0,
         cursor: "pointer",
-        background: !active && hover ? p.bg2 : "transparent",
+        // Active = neutral fill + a 2.5px accent edge tick (the reference tick alone
+        // read as almost invisible); hover = the same faint fill, no tick.
+        background: active || hover ? p.bg2 : "transparent",
         color: active ? p.txt : p.txt2,
-        boxShadow: active ? `inset 2px 0 0 ${p.accent}` : "none",
+        boxShadow: active ? `inset 2.5px 0 0 ${p.accent}` : "none",
         fontSize: 13,
         fontWeight: active ? 600 : 500,
       }}

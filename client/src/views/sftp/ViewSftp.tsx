@@ -86,11 +86,12 @@ export function ViewSftp() {
   const [editor, setEditor] = useState<{ source: FileSource; path: string; name: string; size: number } | null>(null);
   const [dropTab, setDropTab] = useState<{ slot: "left" | "right"; id: string } | null>(null);
 
-  // "Quick SFTP" from the Hosts rail opens a session then routes here; focus that
-  // session in the left pane and clear the one-shot flag.
+  // "Quick SFTP" from the Hosts view opens a session then routes here; show it in
+  // the RIGHT pane (Local stays on the left — the natural transfer layout) and
+  // clear the one-shot flag.
   useEffect(() => {
     if (!pendingSftpFocus) return;
-    setLeftLoc({ kind: "remote", sessionId: pendingSftpFocus });
+    setRightLoc({ kind: "remote", sessionId: pendingSftpFocus });
     setPendingSftpFocus(null);
   }, [pendingSftpFocus, setPendingSftpFocus]);
 

@@ -47,6 +47,7 @@ function HostCard({
   onToggle,
   onOpen,
   onConnect,
+  onSftp,
 }: {
   h: ConnectionProfile;
   selected: boolean;
@@ -55,6 +56,7 @@ function HostCard({
   onToggle: () => void;
   onOpen: () => void;
   onConnect: () => void;
+  onSftp: () => void;
 }) {
   const p = usePalette();
   const { t, i18n } = useTranslation();
@@ -171,7 +173,19 @@ function HostCard({
       </div>
 
       {show && (
-        <div style={{ position: "absolute", right: 12, bottom: 11, zIndex: 3 }}>
+        <div
+          style={{ position: "absolute", right: 12, bottom: 11, zIndex: 3, display: "flex", gap: 6 }}
+        >
+          <Btn
+            size="sm"
+            variant="ghost"
+            icon="folders"
+            title={t("hosts.openSftp")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSftp();
+            }}
+          />
           <Btn
             size="sm"
             icon="terminal"
@@ -1590,6 +1604,7 @@ export function ViewHosts() {
                   onToggle={() => toggle(h.profileId)}
                   onOpen={() => openHost(h.profileId)}
                   onConnect={() => ctx.connect(h)}
+                  onSftp={() => void ctx.connectSftp(h)}
                 />
               ))}
             </div>

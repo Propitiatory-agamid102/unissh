@@ -1274,7 +1274,7 @@ export function ViewTerminal() {
   } as const;
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: p.bg1, minWidth: 0 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: p.bg0, minWidth: 0 }}>
       {/* tab bar — desktop only; the mobile shell (MTerminal) provides its own
           session switcher + status, so this multi-tab chrome is hidden there */}
       {!isMobile && (
@@ -1282,7 +1282,8 @@ export function ViewTerminal() {
           terminals={terminals}
           activeId={active?.id ?? null}
           hosts={hosts}
-          bg={termTheme.bg}
+          // App chrome, not terminal colours — the tab strip isn't the PTY yet.
+          bg={p.bg0}
           onActivate={setActiveTerm}
           onClose={closeTerminal}
           onCloseOthers={closeOtherTerminals}
@@ -1311,6 +1312,8 @@ export function ViewTerminal() {
               justifyContent: "center",
               gap: 10,
               color: p.txt3,
+              // App chrome, not terminal colours — there is no PTY yet.
+              background: p.bg0,
             }}
           >
             <Icon name="terminal" size={34} color={p.txt3} />
