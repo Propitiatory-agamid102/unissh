@@ -1755,7 +1755,7 @@ function NewTunnelModal({ onClose }: { onClose: () => void }) {
       zIndex={150}
       w={540}
       icon="branch"
-      iconColor={p.purple}
+      iconColor={p.txt2}
       title={t("modals.tunnel.title")}
       subtitle={t("modals.tunnel.subtitle")}
       onClose={onClose}
@@ -2849,7 +2849,7 @@ function BindHostModal({
       zIndex={150}
       w={540}
       icon="fingerprint"
-      iconColor={p.purple}
+      iconColor={p.txt2}
       title={t("bind.title")}
       subtitle={`${host.user ? host.user + "@" : ""}${host.host}:${host.port}`}
       onClose={onClose}
