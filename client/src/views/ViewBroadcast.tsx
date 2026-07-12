@@ -88,7 +88,17 @@ function HostTile({
         }}
       >
         <StatusDot status={off ? (mismatch ? "error" : "offline") : "online"} size={7} />
-        <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+        <span
+          style={{
+            fontFamily: MONO,
+            fontSize: 12.5,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+          }}
+        >
           {host.profile.label}
         </span>
         <div style={{ flex: 1 }} />
@@ -486,7 +496,16 @@ export function ViewBroadcast() {
           // The Connect button is disabled at zero ready hosts; say WHY here so
           // broadcast.noHosts (otherwise unreachable behind the disabled button)
           // is actually surfaced.
-          <span style={{ fontSize: 12, color: p.txt3, whiteSpace: "nowrap" }}>
+          <span
+            style={{
+              fontSize: 12,
+              color: p.txt3,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              minWidth: 0,
+            }}
+          >
             {t("broadcast.noHosts")}
           </span>
         )}

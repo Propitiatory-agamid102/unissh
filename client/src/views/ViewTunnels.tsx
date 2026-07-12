@@ -127,7 +127,9 @@ function TunnelRow({ t: tun, first }: { t: ActiveTunnel; first?: boolean }) {
           justifyContent: "flex-end",
           fontSize: 11.5,
           whiteSpace: "nowrap",
-          ...(isMobile ? { width: "auto", order: 2, flexShrink: 0 } : { width: 80 }),
+          // minWidth (not a hard width) so a longer-language status word grows the
+          // column instead of spilling out of it.
+          ...(isMobile ? { width: "auto", order: 2, flexShrink: 0 } : { minWidth: 80, flexShrink: 0 }),
         }}
       >
         <StatusDot

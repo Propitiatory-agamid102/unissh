@@ -147,8 +147,30 @@ const HostTile = React.memo(function HostTile({
             }}
           />
         )}
-        <span style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap" }}>{h.label}</span>
-        <span style={{ fontFamily: MONO, fontSize: 11, color: p.txt3 }}>
+        <span
+          style={{
+            fontWeight: 700,
+            fontSize: 14,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            flexShrink: 1,
+          }}
+        >
+          {h.label}
+        </span>
+        <span
+          style={{
+            fontFamily: MONO,
+            fontSize: 11,
+            color: p.txt3,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+          }}
+        >
           {h.user}@{h.host}
         </span>
         <div style={{ flex: 1 }} />
@@ -560,6 +582,9 @@ export function ViewFleet() {
             fontSize: 12,
             color: p.txt3,
             whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
           }}
         >
           {filterLabel}

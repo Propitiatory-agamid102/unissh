@@ -355,7 +355,17 @@ function DetailRow({
         borderBottom: `1px solid ${p.line}`,
       }}
     >
-      <span style={{ width: 80, fontSize: 12, color: p.txt3, flexShrink: 0 }}>{label}</span>
+      <span
+        style={{
+          minWidth: 72,
+          fontSize: 12,
+          color: p.txt3,
+          flexShrink: 0,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
       <span
         style={{
           flex: 1,
