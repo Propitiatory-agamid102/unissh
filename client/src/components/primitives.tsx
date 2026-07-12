@@ -201,12 +201,12 @@ export function Tag({ children, mono }: { children: React.ReactNode; mono?: bool
       style={{
         fontSize: 11,
         fontWeight: 500,
-        color: p.txt2,
+        color: p.txt3,
         fontFamily: mono ? MONO : UI,
-        background: p.bg3,
-        border: `1px solid ${p.line}`,
-        borderRadius: 6,
-        padding: "1px 7px",
+        background: "transparent",
+        border: "none",
+        borderRadius: 0,
+        padding: 0,
         lineHeight: 1.5,
         whiteSpace: "nowrap",
         display: "inline-block",
@@ -234,7 +234,9 @@ export function VaultBadge({
 }) {
   const p = usePalette();
   const cloud = target === "cloud";
-  const c = cloud ? p.accent : p.txt3;
+  // Cloud-vs-local is a category, not a status → quiet greyscale glyph + word,
+  // never an accent-filled pill (rubric rule 6).
+  const c = p.txt3;
   return (
     <span
       style={{
@@ -244,10 +246,9 @@ export function VaultBadge({
         fontSize: 10.5,
         fontWeight: 600,
         color: c,
-        background: cloud ? p.accentSoft : p.bg3,
-        border: `1px solid ${cloud ? p.accentLine : p.line}`,
-        borderRadius: 6,
-        padding: "1px 7px",
+        background: "transparent",
+        border: "none",
+        padding: 0,
         lineHeight: 1.5,
         whiteSpace: "nowrap",
       }}
@@ -263,12 +264,13 @@ export function AuthBadge({ auth, jump }: { auth: AuthKind; jump?: boolean }) {
   const p = usePalette();
   const icon: IconName =
     auth === "key" ? "key" : auth === "password" ? "lock" : auth === "personal" ? "fingerprint" : "eye";
-  const c =
-    auth === "key" ? p.accent : auth === "password" ? p.amber : auth === "personal" ? p.purple : p.txt3;
+  // Colour = meaning only: password/ask auth is the weaker credential → amber
+  // warning; everything else is neutral (no decorative accent/purple).
+  const c = auth === "password" || auth === "ask" ? p.amber : p.txt2;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: c }} title={tDyn(AUTH_LABEL_KEY[auth])}>
       <Icon name={icon} size={13} color={c} stroke={1.7} />
-      {jump && <Icon name="branch" size={12} color={p.purple} stroke={1.7} />}
+      {jump && <Icon name="branch" size={12} color={p.txt3} stroke={1.7} />}
     </span>
   );
 }
@@ -362,24 +364,25 @@ export function Btn({
   const variants: Record<BtnVariant, CSSProperties> = {
     primary: {
       // Named themes (e.g. Candy Holo) can paint the primary button with a holo
-      // gradient; everything else falls back to the solid accent. The glow below
-      // stays a solid colour (a gradient can't be a box-shadow colour). The label
+      // gradient; the mono default is a FLAT accent block — no inset sheen, no
+      // accent-coloured glow (the "монохром × воздух" system is flat). The label
       // uses the palette's accentInk so it clears AA on the accent/gradient.
       background: p.accentGradient ?? p.accent,
       color: p.accentInk ?? "#fff",
       border: "1px solid transparent",
-      boxShadow: `0 1px 0 rgba(255,255,255,0.2) inset, 0 6px 18px -6px ${p.accent}`,
+      boxShadow: "none",
     },
     outline: { background: "transparent", color: p.txt, border: `1px solid ${p.line2}` },
-    ghost: { background: p.bg3, color: p.txt, border: `1px solid ${p.line}` },
-    soft: { background: p.accentSoft, color: p.accent, border: `1px solid ${p.accentLine}` },
-    // Destructive/security actions: deliberately sober (solid red, no glow). The
-    // label uses dangerInk — accentInk is tuned for the accent surface and can
-    // fail AA on red (e.g. candy-light's plum ink on #d02545 is 3.05:1).
+    // Ghost/soft secondaries stay neutral (rubric rule 10): no accent tint, no
+    // resting tonal fill. Ghost = borderless text; soft = faint neutral fill.
+    ghost: { background: "transparent", color: p.txt2, border: "1px solid transparent" },
+    soft: { background: p.bg2, color: p.txt, border: `1px solid ${p.line}` },
+    // Destructive/security actions: sober red OUTLINE (no fill-scream) — transparent
+    // bg, red border + red label. Unmistakable without shouting.
     danger: {
-      background: p.red,
-      color: p.dangerInk ?? "#fff",
-      border: "1px solid transparent",
+      background: "transparent",
+      color: p.red,
+      border: `1px solid ${p.red}`,
       boxShadow: "none",
     },
   };
@@ -399,10 +402,10 @@ export function Btn({
         gap: 7,
         fontFamily: UI,
         fontSize: fs,
-        fontWeight: 600,
+        fontWeight: variant === "primary" ? 700 : 600,
         letterSpacing: 0.1,
         padding: pad,
-        borderRadius: 9,
+        borderRadius: 10,
         cursor: disabled ? "default" : "pointer",
         width: full ? "100%" : "auto",
         opacity: disabled ? 0.5 : 1,
@@ -435,8 +438,7 @@ export function Logo({ size = 22, color }: { size?: number; color?: string }) {
             position: "absolute",
             inset: 0,
             borderRadius: size * 0.28,
-            background: `linear-gradient(140deg, ${c}, ${p.purple})`,
-            boxShadow: `0 4px 14px -4px ${c}`,
+            background: c,
           }}
         />
         <span
@@ -491,14 +493,14 @@ export function IconBtn({
         alignItems: "center",
         justifyContent: "center",
         borderRadius: 8,
-        background: active ? p.accentSoft : "transparent",
-        border: `1px solid ${active ? p.accentLine : "transparent"}`,
-        color: color || (active ? p.accent : p.txt2),
+        background: active ? p.bg2 : "transparent",
+        border: `1px solid ${active ? p.line : "transparent"}`,
+        color: color || (active ? p.txt : p.txt2),
         cursor: "pointer",
         transition: "background .12s, color .12s",
       }}
       onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.background = p.bg3;
+        if (!active) e.currentTarget.style.background = p.bg2;
       }}
       onMouseLeave={(e) => {
         if (!active) e.currentTarget.style.background = "transparent";
